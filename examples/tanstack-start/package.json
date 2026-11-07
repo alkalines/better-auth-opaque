@@ -1,0 +1,34 @@
+{
+  "name": "@alkalines/better-auth-opaque-example-tanstack-start",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:setup": "prisma generate && prisma migrate deploy",
+    "dev": "bun run --cwd ../.. build && bun run db:setup && vite dev",
+    "test:e2e": "playwright test -c e2e/playwright.config.ts",
+    "typecheck": "prisma generate && tsc --noEmit"
+  },
+  "dependencies": {
+    "@alkalines/better-auth-opaque": "workspace:*",
+    "@prisma/adapter-libsql": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "@tanstack/react-router": "1.170.46",
+    "@tanstack/react-start": "1.169.4",
+    "better-auth": "1.7.18",
+    "dotenv": "18.0.9",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "prisma": "7.10.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.6"
+  }
+}

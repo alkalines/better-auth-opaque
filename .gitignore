@@ -4,23 +4,28 @@ node_modules
 # output
 out
 dist
+pack
 *.tgz
+.output
+.tanstack
+.vinxi
 
 # code coverage
 coverage
 *.lcov
 
+# test output
+playwright-report
+test-results
+blob-report
+
 # logs
 logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+*.log
 
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+# environment files: never commit a real OPAQUE server setup
+.env*
+!.env.example
 
 # caches
 .eslintcache

@@ -1,0 +1,5 @@
+*.db
+*.db-journal
+src/generated/
+.output/
+.tanstack/

@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  full:
+    uses: ./.github/workflows/full.yml
+
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      dist-tag: ${{ steps.meta.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          case "$VERSION" in
+            *-*) echo "dist-tag=next" >> "$GITHUB_OUTPUT" ;;
+            *) echo "dist-tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - run: bun run check:package
+      - run: npm pack --pack-destination pack
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package
+          path: pack/*.tgz
+          if-no-files-found: error
+
+  publish-npm:
+    needs: [full, pack]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: package
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm publish ./*.tgz --access public --provenance --tag "${{ needs.pack.outputs.dist-tag }}"
+        env:
+          # Bootstrap only: delete the NPM_TOKEN secret once npm trusted publishing is configured.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-github:
+    needs: [full, pack]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: package
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: "@alkalines"
+      - run: npm publish ./*.tgz --tag "${{ needs.pack.outputs.dist-tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  github-release:
+    needs: [pack, publish-npm, publish-github]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: package
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIST_TAG: ${{ needs.pack.outputs.dist-tag }}
+        run: |
+          PRERELEASE=""
+          if [ "$DIST_TAG" = "next" ]; then PRERELEASE="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" ./*.tgz --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag $PRERELEASE

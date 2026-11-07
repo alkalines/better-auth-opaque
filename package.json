@@ -1,14 +1,89 @@
 {
-  "name": "better-auth-opaque-plugin",
-  "module": "src/index.ts",
+  "name": "@alkalines/better-auth-opaque",
+  "version": "0.1.0",
+  "description": "OPAQUE (RFC 9807) password authentication plugin for Better Auth",
+  "keywords": [
+    "authentication",
+    "better-auth",
+    "opaque",
+    "pake",
+    "password",
+    "rfc9807"
+  ],
+  "homepage": "https://github.com/alkalines/better-auth-opaque#readme",
+  "bugs": {
+    "url": "https://github.com/alkalines/better-auth-opaque/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alkalines/better-auth-opaque.git"
+  },
+  "bin": {
+    "better-auth-opaque": "./dist/cli.js"
+  },
+  "workspaces": [
+    "examples/*",
+    "test/convex"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "typecheck": "bun check"
+    "build": "tsdown",
+    "check:package": "publint --strict && attw --pack . --profile esm-only",
+    "create-setup": "bun src/cli.ts create-setup",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint",
+    "test": "vitest run",
+    "test:convex": "bun run --cwd test/convex test",
+    "test:e2e": "bun run --cwd examples/tanstack-start test:e2e",
+    "typecheck": "tsc -p tsconfig.json && bun run build && bun run --workspaces --if-present typecheck"
+  },
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@arethetypeswrong/cli": "0.18.5",
+    "@better-auth/core": "1.7.18",
+    "@edge-runtime/vm": "5.0.0",
+    "@types/node": "26.6.6",
+    "better-auth": "1.7.18",
+    "oxfmt": "0.77.0",
+    "oxlint": "1.92.0",
+    "publint": "0.3.25",
+    "tsdown": "0.23.7",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0",
+    "zod": "4.6.7"
   },
   "peerDependencies": {
-    "typescript": "^7"
-  }
+    "@better-auth/core": ">=1.7.16 <1.8.0",
+    "better-auth": ">=1.7.16 <1.8.0",
+    "zod": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "bun@1.4.4"
 }

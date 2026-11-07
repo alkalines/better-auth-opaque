@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "proseWrap": "preserve",
+  "ignorePatterns": [
+    "dist/**",
+    "bun.lock",
+    "**/routeTree.gen.ts",
+    "**/_generated/**",
+    "**/.output/**",
+    "**/.tanstack/**",
+    "**/playwright-report/**",
+    "**/test-results/**"
+  ]
+}

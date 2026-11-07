@@ -1,0 +1,72 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "vitest"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "env": {
+    "browser": true,
+    "es2024": true
+  },
+  "ignorePatterns": [
+    "dist/**",
+    "**/routeTree.gen.ts",
+    "**/_generated/**",
+    "**/.output/**",
+    "**/.tanstack/**",
+    "**/playwright-report/**",
+    "**/test-results/**"
+  ],
+  "rules": {
+    "typescript/no-explicit-any": "warn",
+    "typescript/consistent-type-imports": "error",
+    "import/no-cycle": "error",
+    "eqeqeq": "error",
+    "no-console": "off"
+  },
+  "overrides": [
+    {
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["node:*", "fs", "path", "crypto", "buffer", "process"],
+                "message": "Published code uses Web APIs only (AGENTS.md)."
+              }
+            ]
+          }
+        ],
+        "no-restricted-globals": [
+          "error",
+          { "name": "Buffer", "message": "Published code uses Web APIs only (AGENTS.md)." },
+          { "name": "require", "message": "Published code is ESM only (AGENTS.md)." },
+          { "name": "__dirname", "message": "Published code uses Web APIs only (AGENTS.md)." }
+        ]
+      }
+    },
+    {
+      "files": ["src/client/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../server/*", "../server", "**/server/**"],
+                "message": "The client entry must not import server code (AGENTS.md)."
+              },
+              {
+                "group": ["node:*", "fs", "path", "crypto", "buffer", "process"],
+                "message": "Published code uses Web APIs only (AGENTS.md)."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

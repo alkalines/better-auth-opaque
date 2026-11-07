@@ -1,0 +1,26 @@
+{
+  "name": "@alkalines/better-auth-opaque-convex-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "bun scripts/generate-schema.ts",
+    "test": "bun scripts/run.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p convex/tsconfig.json"
+  },
+  "dependencies": {
+    "@alkalines/better-auth-opaque": "workspace:*",
+    "@convex-dev/better-auth": "0.13.0",
+    "better-auth": "1.7.18",
+    "convex": "1.49.0",
+    "react": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@serenity-kit/opaque": "1.1.0",
+    "@types/node": "26.6.6",
+    "auth": "1.7.18",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}
