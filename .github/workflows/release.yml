@@ -42,7 +42,8 @@ jobs:
       - run: bun run test
       - run: bun run build
       - run: bun run check:package
-      - run: npm pack --pack-destination pack
+      # npm pack does not create --pack-destination.
+      - run: mkdir -p pack && npm pack --pack-destination pack
       - uses: actions/upload-artifact@v7
         with:
           name: package
