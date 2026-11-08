@@ -52,7 +52,9 @@ describe("sign-up and sign-in", () => {
     expectNotSent([browser, other], [password, signUp.data!.exportKey]);
   });
 
-  test("the default rfc-recommended profile works end to end", async () => {
+  // Runs two full rfc-recommended Argon2id derivations (sign-up and sign-in), which takes several
+  // seconds on shared CI runners, well past Vitest's 5 s default.
+  test("the default rfc-recommended profile works end to end", { timeout: 30_000 }, async () => {
     const auth = createTestAuth({ db: createMemoryDb(), opaque: { serverSetup } });
     const browser = createTestClient(auth);
     const password = "default-profile-password";
