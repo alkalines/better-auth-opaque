@@ -2,6 +2,10 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 0.1.3 (2026-11-07)
+
+No package changes; the contents match 0.1.2. The npm release is now staged through npm trusted publishing (OIDC) instead of an npm token, and still needs a maintainer's 2FA approval.
+
 ## 0.1.2 (2026-11-07)
 
 First release on npm. The package contents match 0.1.0. The release workflow now stages the npm release with `npm stage publish`, and a maintainer approves it with 2FA before it goes live.
