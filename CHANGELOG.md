@@ -2,9 +2,13 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
-## 0.1.1 (2026-11-07)
+## 0.1.2 (2026-11-07)
 
-First published release. The package contents match 0.1.0. The release workflow now creates its pack directory before running `npm pack`.
+First release on npm. The package contents match 0.1.0. The release workflow now stages the npm release with `npm stage publish`, and a maintainer approves it with 2FA before it goes live.
+
+## 0.1.1 (2026-11-07, GitHub Packages only)
+
+Published to GitHub Packages only; the npm publish failed because CI cannot pass 2FA. The package contents match 0.1.0. The release workflow now creates its pack directory before running `npm pack`.
 
 ## 0.1.0 (2026-11-07, not published)
 

@@ -1,6 +1,6 @@
 {
   "name": "@alkalines/better-auth-opaque",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OPAQUE (RFC 9807) password authentication plugin for Better Auth",
   "keywords": [
     "authentication",
