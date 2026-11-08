@@ -51,7 +51,7 @@
 ## Compatibility and releases
 
 - Semver. Breaking changes: endpoint paths or bodies, stored fields, hook signatures, error codes, stretching defaults, supported peer ranges. Stored-data changes need a documented migration.
-- `version` in `package.json` changes only in a release PR. CI publishes on `v*.*.*` tags to npm and GitHub Packages; **never run `npm publish` locally** after the first bootstrap release.
+- `version` in `package.json` changes only in a release PR. On `v*.*.*` tags CI publishes to GitHub Packages and stages the npm release (`npm stage publish`); a maintainer approves the staged version with 2FA before it goes live. **Never run `npm publish` locally** after the first bootstrap release.
 
 ## Verification
 
