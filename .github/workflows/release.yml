@@ -66,13 +66,11 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # Authenticates through npm trusted publishing (OIDC, `id-token: write`); there is no npm token secret.
       # Stage only (needs npm >= 11.15.0, bundled with Node 24): the version stays unavailable until a maintainer
       # approves it with 2FA on npmjs.com (Staged Packages) or with `npm stage approve`, so a compromised CI run
       # cannot publish on its own.
       - run: npm stage publish ./*.tgz --access public --provenance --tag "${{ needs.pack.outputs.dist-tag }}"
-        env:
-          # Bootstrap only: delete the NPM_TOKEN secret once npm trusted publishing is configured.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-github:
     needs: [full, pack]
