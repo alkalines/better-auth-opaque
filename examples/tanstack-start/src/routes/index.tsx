@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { authClient } from "../lib/auth-client";
 import { clearDataKey } from "../lib/demo-crypto";
 
@@ -30,6 +30,9 @@ function Home() {
           Sign out
         </button>
       ) : null}
+      <p>
+        <Link to="/two-factor">Manage two-factor authentication</Link>
+      </p>
     </main>
   );
 }

@@ -20,6 +20,8 @@ model User {
   sessions      Session[]
   accounts      Account[]
   payloads      DemoPayload[]
+  twoFactorEnabled Boolean? @default(false)
+  twoFactors       TwoFactor[]
 
   @@map("user")
 }
@@ -74,6 +76,21 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+model TwoFactor {
+  id                      String    @id
+  secret                  String
+  backupCodes             String
+  userId                  String
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean?  @default(true)
+  failedVerificationCount Int?      @default(0)
+  lockedUntil             DateTime?
+
+  @@index([secret])
+  @@index([userId])
+  @@map("twoFactor")
 }
 
 // Demo app payload: the wrapped data key, one row per credential version.

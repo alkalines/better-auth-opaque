@@ -25,6 +25,12 @@ export type OpaqueStates = {
     credentialId: string | null;
     credentialVersion: string | null;
   };
+  "password-proof": {
+    userId: string;
+    credentialId: string;
+    credentialVersion: string;
+    serverLoginState: string;
+  };
   "change-password": {
     userId: string;
     credentialId: string;

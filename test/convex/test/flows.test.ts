@@ -44,7 +44,8 @@ describe("OPAQUE on the Convex default runtime", () => {
     const signIn = await other.authClient.signIn.opaque({ email, password });
     expect(signIn.error).toBeNull();
     expect(signIn.data?.exportKey).toBe(signUp.exportKey);
-    expect(signIn.data?.user.id).toBe(signUp.user.id);
+    expect(signIn.data?.twoFactorRedirect).toBeUndefined();
+    expect(signIn.data?.user?.id).toBe(signUp.user.id);
     expect(signIn.data?.payload).toEqual({ label: "v1", keyHint: signUp.exportKey.slice(0, 4) });
 
     const session = await other.authClient.getSession();

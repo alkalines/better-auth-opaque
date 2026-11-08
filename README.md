@@ -72,9 +72,50 @@ It throws `USER_NOT_FOUND` when the email has no OPAQUE account; do not forward 
 
 ### Limitations
 
-- **Two-factor:** Better Auth's `twoFactor` plugin does not gate OPAQUE sign-in, so users with two-factor enabled are refused with `TWO_FACTOR_NOT_SUPPORTED` instead of being signed in without their second factor.
 - **Password policy:** the server never sees the password, so `emailAndPassword.minPasswordLength`/`maxPasswordLength` cannot be enforced server-side. Check length in your client before calling the plugin.
 - **`account.update` database hooks** do not run when a password change or reset switches the credential (the switch is a compare-and-set on the credential version). `user.create`, `account.create` and `session.create` hooks run as usual.
+
+### Two-factor authentication
+
+OPAQUE sign-in goes through Better Auth's own [two-factor](https://www.better-auth.com/docs/plugins/2fa) gate: the plugin hands `/sign-in/opaque/complete` to the installed `twoFactor` plugin's sign-in hook, so trusted devices, TOTP, OTP and backup codes behave as for email/password sign-in.
+
+```ts
+import { twoFactor } from "better-auth/plugins";
+
+betterAuth({
+  plugins: [
+    opaque({ serverSetup }),
+    // OPAQUE users have no credential password; the opaque plugin requires a password proof instead.
+    twoFactor({ allowPasswordless: true }),
+  ],
+});
+```
+
+```ts
+import { twoFactorClient } from "better-auth/client/plugins";
+
+const authClient = createAuthClient({ plugins: [opaqueClient(), twoFactorClient()] });
+
+// Managing 2FA: prove the password with OPAQUE, then pass the one-time proof as `password`.
+const { data: proof } = await authClient.opaque.createPasswordProof({ password });
+const { data: setup } = await authClient.twoFactor.enable({ password: proof!.proof });
+await authClient.twoFactor.verifyTotp({ code });
+
+// Signing in: the payload is withheld until the second factor is verified.
+const { data } = await authClient.signIn.opaque({ email, password });
+if (data?.twoFactorRedirect) {
+  await authClient.twoFactor.verifyTotp({ code, trustDevice: true });
+  const { data: loaded } = await authClient.opaque.loadSignInPayload({
+    payloadToken: data.payloadToken,
+  });
+  // loaded.payload, data.exportKey
+}
+```
+
+- `twoFactor({ allowPasswordless: true })` is required: OPAQUE users have no credential password, so without it they cannot enable 2FA (the plugin logs a warning at startup). The opaque plugin then requires a valid password proof (`opaque.createPasswordProof`: single use, 5 minutes, bound to the user and the current credential) for `/two-factor/enable`, `/disable`, `/get-totp-uri` and `/generate-backup-codes`. Users who also have an email/password credential keep Better Auth's password check.
+- A 2FA sign-in returns `{ twoFactorRedirect, twoFactorMethods, payloadToken, exportKey }` and no session or payload. Keep `exportKey` and `payloadToken` in memory and handle the redirect in your sign-in UI; `twoFactorClient({ twoFactorPage })` reloads the page and loses them. `loadSignInPayload` needs the session created by the second-factor verification, is single use and expires with the two-factor cookie (`twoFactorCookieMaxAge`, 10 minutes by default).
+- The export key is returned before the second factor because anyone holding the password can derive it locally from the challenge; what 2FA protects is the session and the payload.
+- The integration calls the installed two-factor plugin's sign-in hook, an internal of Better Auth; it is tested with better-auth 1.7.18. If the hook cannot be found, 2FA users fail closed with `TWO_FACTOR_NOT_SUPPORTED` instead of signing in without their second factor.
 
 ### Payload hooks
 

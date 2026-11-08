@@ -1,3 +1,5 @@
+import { base32 } from "@better-auth/utils/base32";
+import { createOTP } from "@better-auth/utils/otp";
 import { expect, test, type Page } from "@playwright/test";
 
 // Distinctive strings so that any appearance in a request is unambiguous.
@@ -8,6 +10,8 @@ const PASSWORDS = {
   flow3New: "pw-flow3new-Cm4yW6-opaque",
   flow4Old: "pw-flow4old-Dj2pF7-opaque",
   flow4New: "pw-flow4new-Ek9sG1-opaque",
+  twoFactor: "pw-twoFactor-Ft6uN8-opaque",
+  twoFactorWrong: "pw-twoFactorWrong-Gv7wP9-opaque",
 };
 
 const runId = Date.now().toString(36);
@@ -25,10 +29,16 @@ test.beforeEach(({ page }) => {
 test.afterAll(() => {
   expect(sentRequests.some((request) => request.body.length > 0)).toBe(true);
   for (const password of Object.values(PASSWORDS)) {
-    for (const request of sentRequests) {
-      expect(request.body, `request body to ${request.url}`).not.toContain(password);
-      expect(request.url, "request URL").not.toContain(password);
-    }
+    // Inspect every captured request, but report leaks together instead of creating thousands
+    // of individual Playwright assertion/trace steps as the browser flows grow.
+    const leaks = sentRequests
+      .filter((request) => request.body.includes(password) || request.url.includes(password))
+      .map((request) => ({
+        url: request.url,
+        bodyContainsPassword: request.body.includes(password),
+        urlContainsPassword: request.url.includes(password),
+      }));
+    expect(leaks, `requests containing ${password}`).toEqual([]);
   }
 });
 
@@ -168,4 +178,80 @@ test("password reset works once and the link cannot be reused", async ({ page })
   await expectStatus(page, "error", /\S/);
   await signIn(page, email, PASSWORDS.flow4Old);
   await expectStatus(page, "error", /\S/);
+});
+
+test("two-factor gates the payload, trusts the device, and can be disabled", async ({ page }) => {
+  test.setTimeout(120_000);
+  const email = emailFor("two-factor");
+  const originalFingerprint = await signUp(page, email, PASSWORDS.twoFactor);
+  await openForm(page, "/two-factor");
+  await page.locator("#password").fill(PASSWORDS.twoFactor);
+  await page.locator("#enable").click();
+  const secret = page.locator("#totp-secret");
+  await expect(secret).toHaveText(/\S+/);
+  await expect(page.locator("#backup-codes li")).toHaveCount(10);
+  const otp = createOTP(base32.decode((await secret.textContent())!));
+  await page.locator("#code").fill(await otp.totp());
+  await page.locator("#verify").click();
+  await expectStatus(page, "success", /^Two-factor enabled$/);
+  await signOut(page);
+
+  await signIn(page, email, PASSWORDS.twoFactorWrong);
+  const wrongPasswordText = await expectStatus(page, "error", /\S/);
+  await expect(page.locator("#totp-form")).toHaveCount(0);
+  await signIn(page, emailFor("two-factor-unknown"), PASSWORDS.twoFactorWrong);
+  expect(await expectStatus(page, "error", /\S/)).toBe(wrongPasswordText);
+  await expect(page.locator("#totp-form")).toHaveCount(0);
+
+  await signIn(page, email, PASSWORDS.twoFactor);
+  await expect(page.locator("#totp-form")).toBeVisible();
+  await expect(page.locator("#status")).not.toContainText("fingerprint");
+  // Include adjacent windows too, so crossing a 30-second boundary before submission is safe.
+  const counter = Math.floor(Date.now() / 30_000);
+  const validCodes = await Promise.all(
+    [-2, -1, 0, 1, 2].map((offset) => otp.hotp(counter + offset)),
+  );
+  const wrongCode = ["000000", "111111", "222222", "333333", "444444", "555555"].find(
+    (code) => !validCodes.includes(code),
+  )!;
+  await page.locator("#code").fill(wrongCode);
+  await page.locator("#verify").click();
+  await expectStatus(page, "error", /\S/);
+  await expect(page.locator("#totp-form")).toBeVisible();
+  await expect(page.locator("#status")).not.toContainText("fingerprint");
+
+  // Better Auth 1.7.18 verifies the current +/- one-step window without storing a used
+  // counter: setup and sign-in may reuse the same code. Generate at submission, not setup.
+  await page.locator("#code").fill(await otp.totp());
+  await page.locator("#verify").click();
+  expect(fingerprintOf(await expectStatus(page, "success", /^Signed in\. Key fingerprint: /))).toBe(
+    originalFingerprint,
+  );
+  await signOut(page);
+
+  await signIn(page, email, PASSWORDS.twoFactor);
+  await expect(page.locator("#totp-form")).toBeVisible();
+  await page.locator("#trust-device").check();
+  await page.locator("#code").fill(await otp.totp());
+  await page.locator("#verify").click();
+  expect(fingerprintOf(await expectStatus(page, "success", /^Signed in\. Key fingerprint: /))).toBe(
+    originalFingerprint,
+  );
+  await signOut(page);
+  expect(await signInExpectingFingerprint(page, email, PASSWORDS.twoFactor)).toBe(
+    originalFingerprint,
+  );
+  await expect(page.locator("#totp-form")).toHaveCount(0);
+
+  await openForm(page, "/two-factor");
+  await page.locator("#password").fill(PASSWORDS.twoFactor);
+  await page.locator("#disable").click();
+  await expectStatus(page, "success", /^Two-factor disabled$/);
+  await signOut(page);
+  // Clear trust as well: this final sign-in proves disabling, not the trusted-device bypass.
+  await page.context().clearCookies();
+  expect(await signInExpectingFingerprint(page, email, PASSWORDS.twoFactor)).toBe(
+    originalFingerprint,
+  );
+  await expect(page.locator("#totp-form")).toHaveCount(0);
 });

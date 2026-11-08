@@ -3,6 +3,7 @@ import { opaque } from "@alkalines/better-auth-opaque";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
+import { twoFactor } from "better-auth/plugins";
 import { PrismaClient } from "../generated/prisma/client";
 
 const prisma = new PrismaClient({
@@ -16,6 +17,7 @@ export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET,
   database: prismaAdapter(prisma, { provider: "sqlite" }),
   plugins: [
+    twoFactor({ allowPasswordless: true, issuer: "better-auth-opaque example" }),
     opaque({
       // Fails closed when unset or invalid; generate one with `bun run create-setup`.
       serverSetup: process.env.OPAQUE_SERVER_SETUP!,

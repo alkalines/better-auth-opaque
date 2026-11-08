@@ -14,6 +14,7 @@ import { hmacSha256 } from "./crypto.ts";
 import { sendVerificationEmail } from "./email-password-parity.ts";
 import type { OpaqueRuntime } from "./runtime.ts";
 import { consumeState, createState } from "./state.ts";
+import { rememberTwoFactorSignIn, twoFactorSignInHook } from "./two-factor.ts";
 
 /** The single sign-in failure: unknown email, no OPAQUE account, wrong password, stale proof. */
 function invalidCredentials(): APIError {
@@ -107,18 +108,21 @@ export function signInEndpoints(runtime: OpaqueRuntime) {
         throw APIError.from("FORBIDDEN", BASE_ERROR_CODES.EMAIL_NOT_VERIFIED);
       }
 
-      // Better Auth's two-factor plugin only intercepts its own sign-in paths, so a session issued
-      // here would skip the second factor. Fail closed instead of creating one.
-      if ("twoFactorEnabled" in user && user.twoFactorEnabled === true) {
+      const needsTwoFactor =
+        ctx.context.getPlugin("two-factor") !== null &&
+        "twoFactorEnabled" in user &&
+        user.twoFactorEnabled === true;
+      if (needsTwoFactor && !twoFactorSignInHook(ctx)) {
         throw APIError.from("FORBIDDEN", OPAQUE_ERROR_CODES.TWO_FACTOR_NOT_SUPPORTED);
       }
 
-      // Loaded before the session exists so a failing hook does not leave a session behind.
-      const payload =
-        (await runtime.hooks.loadPayload?.(
-          { userId: user.id, credentialVersion: credential.credentialVersion, flow: "sign-in" },
-          ctx,
-        )) ?? null;
+      // A password alone must not release app secrets when the second factor is still pending.
+      const payload = needsTwoFactor
+        ? null
+        : ((await runtime.hooks.loadPayload?.(
+            { userId: user.id, credentialVersion: credential.credentialVersion, flow: "sign-in" },
+            ctx,
+          )) ?? null);
 
       const dontRememberMe = ctx.body.rememberMe === false;
       const session = await ctx.context.internalAdapter.createSession(user.id, dontRememberMe);
@@ -138,6 +142,14 @@ export function signInEndpoints(runtime: OpaqueRuntime) {
         throw invalidCredentials();
       }
       await setSessionCookie(ctx, { session, user }, dontRememberMe);
+      if (needsTwoFactor) {
+        rememberTwoFactorSignIn(ctx, {
+          userId: user.id,
+          credentialId: credential.credentialId,
+          credentialVersion: credential.credentialVersion,
+          sessionToken: session.token,
+        });
+      }
 
       return ctx.json({
         token: session.token,

@@ -29,6 +29,9 @@ export const OPAQUE_PATHS = {
   signUpComplete: "/sign-up/opaque/complete",
   signInChallenge: "/sign-in/opaque/challenge",
   signInComplete: "/sign-in/opaque/complete",
+  signInPayload: "/sign-in/opaque/payload",
+  passwordProofChallenge: "/opaque/password-proof/challenge",
+  passwordProofComplete: "/opaque/password-proof/complete",
   changePasswordChallenge: "/opaque/change-password/challenge",
   changePasswordComplete: "/opaque/change-password/complete",
   resetVerify: "/reset/opaque/verify",
@@ -57,12 +60,12 @@ export const OPAQUE_ERROR_CODES = {
     code: "INVALID_CREDENTIALS",
     message: "Invalid email or password",
   },
-  /** The current password proof of a password change failed. */
+  /** A current-password proof failed, including a missing, expired, used, or stale management proof. */
   INVALID_PASSWORD: {
     code: "INVALID_PASSWORD",
     message: "Invalid password",
   },
-  /** The referenced challenge state does not exist, was already used, or expired. */
+  /** A challenge state or deferred sign-in payload token is missing, consumed, or expired. */
   INVALID_STATE: {
     code: "INVALID_STATE",
     message: "OPAQUE state is invalid or expired",
@@ -96,13 +99,13 @@ export const OPAQUE_ERROR_CODES = {
     message: "Credential changed during the operation",
   },
   /**
-   * Sign-in proved the password, but the user has Better Auth two-factor authentication enabled.
-   * The plugin does not implement the second factor, so it fails closed and creates no session.
+   * Sign-in proved the password, but 2FA is enabled without a usable Better Auth two-factor
+   * sign-in hook. This is a server misconfiguration; no session or payload is returned.
    * Only returned after a valid password proof, so it does not reveal whether an email exists.
    */
   TWO_FACTOR_NOT_SUPPORTED: {
     code: "TWO_FACTOR_NOT_SUPPORTED",
-    message: "Two-factor authentication is not supported for OPAQUE sign-in",
+    message: "Two-factor authentication is not configured for OPAQUE sign-in",
   },
   /** The client sent a payload but the server has no `commitPayload` hook. */
   PAYLOAD_NOT_SUPPORTED: {
@@ -249,6 +252,21 @@ export const signInCompleteBodySchema = z.object({
   rememberMe: z.boolean().optional(),
 });
 
+/** Fetches the credential-bound payload after Better Auth verifies the second factor. Single use. */
+export const signInPayloadBodySchema = z.object({ payloadToken: stateIdSchema });
+
+/** Starts a session-bound OPAQUE login to authorize one two-factor management operation. */
+export const passwordProofChallengeBodySchema = z.object({ loginRequest: opaqueMessageSchema });
+
+/** The proof challenge uses the same login parameters as sign-in, without an email. */
+export const passwordProofChallengeResponseSchema = signInChallengeResponseSchema;
+
+/** Completes a password proof; neither password nor export key is transmitted. */
+export const passwordProofCompleteBodySchema = z.object({
+  stateId: stateIdSchema,
+  loginFinalization: opaqueMessageSchema,
+});
+
 // Password change (requires a session)
 
 /**
@@ -309,14 +327,32 @@ export const createPasswordResetTokenBodySchema = z.object({
 // Responses carrying app payloads
 
 /**
- * Response of `/sign-in/opaque/complete`: Better Auth's session token and user plus the
- * `loadPayload` output for the credential that was just verified (`null` without the hook).
+ * Response of `/sign-in/opaque/complete`. A pending second factor never includes a session or
+ * payload; retain its single-use `payloadToken` until verification succeeds.
  */
-export type SignInCompleteResponse<TUser = Record<string, unknown>> = {
-  token: string;
-  user: TUser;
-  payload: unknown;
-};
+export type SignInCompleteResponse<TUser = Record<string, unknown>> =
+  | {
+      token: string;
+      user: TUser;
+      payload: unknown;
+      twoFactorRedirect?: false;
+      twoFactorMethods?: never;
+      payloadToken?: never;
+    }
+  | {
+      twoFactorRedirect: true;
+      twoFactorMethods: string[];
+      payloadToken: string;
+      token?: never;
+      user?: never;
+      payload?: never;
+    };
+
+/** Payload for the credential proved before 2FA; requires a new authenticated session. */
+export type SignInPayloadResponse = { payload: unknown };
+
+/** Single-use, five-minute authorization passed as `password` to a two-factor management call. */
+export type PasswordProofResponse = { proof: string };
 
 /**
  * Response of `/sign-up/opaque/complete`, matching Better Auth email/password sign-up: `token`

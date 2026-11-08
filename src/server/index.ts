@@ -11,12 +11,16 @@ import { resetPasswordEndpoints } from "./reset-password.ts";
 import { createRuntime, type OpaqueOptions } from "./runtime.ts";
 import { signInEndpoints } from "./sign-in.ts";
 import { signUpEndpoints } from "./sign-up.ts";
+import { twoFactorIntegration } from "./two-factor.ts";
 
 export type { OpaqueOptions } from "./runtime.ts";
 
 const signInAndResetPaths: string[] = [
   OPAQUE_PATHS.signInChallenge,
   OPAQUE_PATHS.signInComplete,
+  OPAQUE_PATHS.signInPayload,
+  OPAQUE_PATHS.passwordProofChallenge,
+  OPAQUE_PATHS.passwordProofComplete,
   OPAQUE_PATHS.resetVerify,
   OPAQUE_PATHS.resetChallenge,
   OPAQUE_PATHS.resetComplete,
@@ -38,11 +42,16 @@ const registrationPaths: string[] = [
  * (`registrationRecord`, `opaqueCredentialVersion`, `opaqueKeyStretching` on `account`) with
  * Better Auth's migration tooling.
  *
+ * With `twoFactor({ allowPasswordless: true })`, sign-in delegates to Better Auth's second-factor
+ * gate. OPAQUE users authorize 2FA management with `opaque.createPasswordProof`, passing its
+ * one-use proof instead of a password. Credential payloads are withheld until 2FA succeeds.
+ *
  * HTTP endpoints are `scope: "server"`, so the Better Auth client does not infer path actions for
  * them; use the `opaqueClient` plugin, whose actions run both protocol round trips.
  */
 export function opaque(options: OpaqueOptions) {
   const runtime = createRuntime(options);
+  const twoFactor = twoFactorIntegration(runtime);
 
   /**
    * Server-only (never routed over HTTP): resolves serenity and validates `serverSetup`, returning
@@ -58,11 +67,21 @@ export function opaque(options: OpaqueOptions) {
 
   return {
     id: OPAQUE_PLUGIN_ID,
+    init(ctx) {
+      const plugin = ctx.getPlugin("two-factor");
+      if (plugin && !plugin.options?.allowPasswordless) {
+        ctx.logger.warn(
+          "opaque: configure twoFactor({ allowPasswordless: true }) so OPAQUE users can manage 2FA with opaque.createPasswordProof; no credential password is stored.",
+        );
+      }
+    },
+    hooks: twoFactor.hooks,
     endpoints: {
       ...signUpEndpoints(runtime),
       ...signInEndpoints(runtime),
       ...changePasswordEndpoints(runtime),
       ...resetPasswordEndpoints(runtime),
+      ...twoFactor.endpoints,
       validateOpaqueSetup,
     },
     schema: {

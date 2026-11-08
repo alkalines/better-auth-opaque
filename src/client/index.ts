@@ -16,11 +16,14 @@ import {
   type CredentialUpdateResponse,
   type OpaqueKeyStretching,
   type ResetVerifyResponse,
+  type PasswordProofResponse,
+  type SignInPayloadResponse,
   type SignInCompleteResponse,
   type SignUpCompleteResponse,
   type changePasswordChallengeResponseSchema,
   type resetChallengeResponseSchema,
   type signInChallengeResponseSchema,
+  type passwordProofChallengeResponseSchema,
   type signUpChallengeResponseSchema,
 } from "../contract.ts";
 
@@ -105,10 +108,27 @@ export type OpaqueVerifyResetTokenInput = {
   fetchOptions?: OpaqueFetchOptions;
 };
 
-/** The export key (base64url) of the credential the action just registered or proved. */
+/** Input of `opaque.loadSignInPayload`; call only after a successful second-factor verification. */
+export type OpaqueLoadSignInPayloadInput = {
+  payloadToken: string;
+  fetchOptions?: OpaqueFetchOptions;
+};
+
+/** Input of `opaque.createPasswordProof`; the password stays local. Requires a session. */
+export type OpaqueCreatePasswordProofInput = {
+  password: string;
+  fetchOptions?: OpaqueFetchOptions;
+};
+
+/**
+ * The export key (base64url) of the credential the completed OPAQUE step registered or proved.
+ * Sign-in may still require 2FA: the key is locally derivable with the password, but the server
+ * withholds the credential payload until the second factor succeeds.
+ */
 type WithExportKey<T> = T & { exportKey: string };
 
 export type OpaqueSignUpData = WithExportKey<SignUpCompleteResponse<User>>;
+/** A completed OPAQUE proof, with either a session/payload or a pending second-factor challenge. */
 export type OpaqueSignInData = WithExportKey<SignInCompleteResponse<User>>;
 export type OpaqueCredentialUpdateData = WithExportKey<CredentialUpdateResponse>;
 
@@ -116,6 +136,7 @@ type SignUpChallengeResponse = z.infer<typeof signUpChallengeResponseSchema>;
 type SignInChallengeResponse = z.infer<typeof signInChallengeResponseSchema>;
 type ChangePasswordChallengeResponse = z.infer<typeof changePasswordChallengeResponseSchema>;
 type ResetChallengeResponse = z.infer<typeof resetChallengeResponseSchema>;
+type PasswordProofChallengeResponse = z.infer<typeof passwordProofChallengeResponseSchema>;
 
 /**
  * Error for a failure detected locally, before any complete call. Status and status text mirror
@@ -297,7 +318,8 @@ export function opaqueClient(options?: OpaqueClientOptions) {
           /**
            * Signs in with email and password. A wrong password and an unknown email produce the
            * same `INVALID_CREDENTIALS` error; when the local OPAQUE step already fails, no
-           * complete request is made.
+           * complete request is made. A 2FA redirect also returns the locally derived export key,
+           * but never a session or payload; verify the second factor, then call loadSignInPayload.
            */
           opaque: async (
             input: OpaqueSignInInput,
@@ -339,12 +361,58 @@ export function opaqueClient(options?: OpaqueClientOptions) {
             if (complete.error) {
               return complete;
             }
-            $store.notify("$sessionSignal");
+            if (!complete.data.twoFactorRedirect) $store.notify("$sessionSignal");
             return { data: { ...complete.data, exportKey: finished.exportKey }, error: null };
           },
         },
 
         opaque: {
+          /**
+           * Loads the credential payload after successful Better Auth second-factor verification.
+           * The token is single use, including failed authenticated attempts; retry sign-in if lost.
+           */
+          loadSignInPayload: (
+            input: OpaqueLoadSignInPayloadInput,
+          ): Promise<OpaqueClientResult<SignInPayloadResponse>> =>
+            post<SignInPayloadResponse>(
+              OPAQUE_PATHS.signInPayload,
+              { payloadToken: input.payloadToken },
+              input.fetchOptions,
+              "complete",
+            ),
+
+          /**
+           * Proves the password locally for one 2FA management request. Pass `proof` as that
+           * method's `password`; it expires in five minutes and is consumed even on rejection.
+           */
+          createPasswordProof: async (
+            input: OpaqueCreatePasswordProofInput,
+          ): Promise<OpaqueClientResult<PasswordProofResponse>> => {
+            const { client } = await loadSerenity();
+            const login = client.startLogin({ password: input.password });
+            const challenge = await post<PasswordProofChallengeResponse>(
+              OPAQUE_PATHS.passwordProofChallenge,
+              { loginRequest: login.startLoginRequest },
+              input.fetchOptions,
+              "challenge",
+            );
+            if (challenge.error) return challenge;
+            const finished = client.finishLogin({
+              clientLoginState: login.clientLoginState,
+              loginResponse: challenge.data.loginResponse,
+              password: input.password,
+              keyStretching: challenge.data.keyStretching,
+              identifiers: serverIdentifiers(challenge.data.serverIdentifier),
+            });
+            if (!finished) return localError("INVALID_PASSWORD", 400, "BAD_REQUEST");
+            return post<PasswordProofResponse>(
+              OPAQUE_PATHS.passwordProofComplete,
+              { stateId: challenge.data.stateId, loginFinalization: finished.finishLoginRequest },
+              input.fetchOptions,
+              "complete",
+            );
+          },
+
           /**
            * Changes the password of the signed-in user: proves the current password and
            * registers the new one in a single challenge/complete pair. Other sessions are

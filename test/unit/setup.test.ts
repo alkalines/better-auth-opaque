@@ -51,6 +51,9 @@ describe("server setup", () => {
       [OPAQUE_PATHS.signUpComplete]: { stateId: "x", registrationRecord: message, name: "New" },
       [OPAQUE_PATHS.signInChallenge]: { email: "setup@example.com", loginRequest: message },
       [OPAQUE_PATHS.signInComplete]: { stateId: "x", loginFinalization: message },
+      [OPAQUE_PATHS.signInPayload]: { payloadToken: "x" },
+      [OPAQUE_PATHS.passwordProofChallenge]: { loginRequest: message },
+      [OPAQUE_PATHS.passwordProofComplete]: { stateId: "x", loginFinalization: message },
       [OPAQUE_PATHS.changePasswordChallenge]: {
         loginRequest: message,
         registrationRequest: message,

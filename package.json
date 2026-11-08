@@ -66,6 +66,7 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
     "@better-auth/core": "1.7.18",
+    "@better-auth/utils": "0.5.1",
     "@edge-runtime/vm": "5.0.0",
     "@types/node": "26.6.6",
     "better-auth": "1.7.18",

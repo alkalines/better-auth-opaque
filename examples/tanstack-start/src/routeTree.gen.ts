@@ -15,6 +15,7 @@ import { Route as ForgotRouteImport } from './routes/forgot'
 import { Route as ResetRouteImport } from './routes/reset'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
+import { Route as TwoFactorRouteImport } from './routes/two-factor'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiDevResetTokenRouteImport } from './routes/api/dev/reset-token'
 
@@ -48,6 +49,11 @@ const SignUpRoute = SignUpRouteImport.update({
   path: '/sign-up',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TwoFactorRoute = TwoFactorRouteImport.update({
+  id: '/two-factor',
+  path: '/two-factor',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   id: '/api/auth/$',
   path: '/api/auth/$',
@@ -66,6 +72,7 @@ export interface FileRoutesByFullPath {
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/two-factor': typeof TwoFactorRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/dev/reset-token': typeof ApiDevResetTokenRoute
 }
@@ -76,6 +83,7 @@ export interface FileRoutesByTo {
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/two-factor': typeof TwoFactorRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/dev/reset-token': typeof ApiDevResetTokenRoute
 }
@@ -87,6 +95,7 @@ export interface FileRoutesById {
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/two-factor': typeof TwoFactorRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/dev/reset-token': typeof ApiDevResetTokenRoute
 }
@@ -99,6 +108,7 @@ export interface FileRouteTypes {
     | '/reset'
     | '/sign-in'
     | '/sign-up'
+    | '/two-factor'
     | '/api/auth/$'
     | '/api/dev/reset-token'
   fileRoutesByTo: FileRoutesByTo
@@ -109,6 +119,7 @@ export interface FileRouteTypes {
     | '/reset'
     | '/sign-in'
     | '/sign-up'
+    | '/two-factor'
     | '/api/auth/$'
     | '/api/dev/reset-token'
   id:
@@ -119,6 +130,7 @@ export interface FileRouteTypes {
     | '/reset'
     | '/sign-in'
     | '/sign-up'
+    | '/two-factor'
     | '/api/auth/$'
     | '/api/dev/reset-token'
   fileRoutesById: FileRoutesById
@@ -130,6 +142,7 @@ export interface RootRouteChildren {
   ResetRoute: typeof ResetRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
+  TwoFactorRoute: typeof TwoFactorRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiDevResetTokenRoute: typeof ApiDevResetTokenRoute
 }
@@ -178,6 +191,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignUpRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/two-factor': {
+      id: '/two-factor'
+      path: '/two-factor'
+      fullPath: '/two-factor'
+      preLoaderRoute: typeof TwoFactorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/auth/$': {
       id: '/api/auth/$'
       path: '/api/auth/$'
@@ -202,6 +222,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetRoute: ResetRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
+  TwoFactorRoute: TwoFactorRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiDevResetTokenRoute: ApiDevResetTokenRoute,
 }

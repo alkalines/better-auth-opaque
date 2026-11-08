@@ -2,6 +2,7 @@ import { ready, server } from "@serenity-kit/opaque";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { createAuthClient } from "better-auth/client";
+import { twoFactorClient } from "better-auth/client/plugins";
 import { expect } from "vitest";
 import { opaqueClient, type OpaqueClientOptions } from "../../src/client/index.ts";
 import type { OpaqueHooks, OpaqueKeyStretching } from "../../src/contract.ts";
@@ -121,6 +122,7 @@ export function createTestClient(
 ) {
   const cookies = new Map<string, string>();
   const requests: CapturedRequest[] = [];
+  const responses: CapturedRequest[] = [];
 
   const customFetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
@@ -133,6 +135,7 @@ export function createTestClient(
       headers.set("cookie", [...cookies].map(([name, value]) => `${name}=${value}`).join("; "));
     }
     const response = await auth.handler(new Request(request, { headers }));
+    responses.push({ url: request.url, body: await response.clone().text() });
 
     for (const setCookie of response.headers.getSetCookie()) {
       const [pair = "", ...attributes] = setCookie.split(";");
@@ -153,11 +156,11 @@ export function createTestClient(
 
   const authClient = createAuthClient({
     baseURL: BASE_URL,
-    plugins: [opaqueClient(options)],
+    plugins: [opaqueClient(options), twoFactorClient()],
     fetchOptions: { customFetchImpl },
   });
 
-  return { authClient, requests, cookies };
+  return { authClient, requests, responses, cookies };
 }
 
 export type TestClient = ReturnType<typeof createTestClient>;
