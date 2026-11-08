@@ -2,9 +2,13 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
-## 0.1.0 (2026-11-07)
+## 0.1.1 (2026-11-07)
 
-Initial release.
+First published release. The package contents match 0.1.0. The release workflow now creates its pack directory before running `npm pack`.
+
+## 0.1.0 (2026-11-07, not published)
+
+Initial release. Tagged `v0.1.0`, but the release workflow failed before publishing, so it is not on npm or GitHub Packages.
 
 - **security** Server plugin `opaque()` for Better Auth 1.7 (peers `better-auth` and `@better-auth/core` `>=1.7.16 <1.8.0`, `zod` `^4`) implementing OPAQUE (RFC 9807) with `@serenity-kit/opaque` 1.1.0 (exact): `POST` endpoints `/sign-up/opaque/{challenge,complete}`, `/sign-in/opaque/{challenge,complete}`, `/opaque/change-password/{challenge,complete}` and `/reset/opaque/{verify,challenge,complete}`.
 - **security** Stored fields on the `account` model: `registrationRecord` (never returned), `opaqueCredentialVersion`, `opaqueKeyStretching`. OPAQUE accounts use `providerId: "opaque"` with a random 256-bit credential id as `accountId` and as the OPAQUE user identifier. No client identifier is bound; the optional `serverIdentifier` is bound into every record.
