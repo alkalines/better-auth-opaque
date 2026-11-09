@@ -43,6 +43,7 @@ async function fixture(input?: {
     accountRateLimit: input?.accountRateLimit,
   });
   const otps: string[] = [];
+  const resetTokens: string[] = [];
   // Runs before every session row is written; a test arms it to race a credential switch.
   const sessionCreation: { before?: () => Promise<void> } = {};
   const twoFactorPlugin = twoFactor({
@@ -66,7 +67,12 @@ async function fixture(input?: {
     logger: { disabled: true },
     plugins,
     advanced: input?.advanced,
-    emailAndPassword: { enabled: input?.classic ?? false },
+    emailAndPassword: {
+      enabled: input?.classic ?? false,
+      sendResetPassword: async ({ token }) => {
+        resetTokens.push(token);
+      },
+    },
     databaseHooks: {
       session: {
         create: {
@@ -85,7 +91,16 @@ async function fixture(input?: {
     payload: PAYLOAD,
   });
   expect(signUp.error).toBeNull();
-  return { db, app, auth, browser, otps, sessionCreation, exportKey: signUp.data!.exportKey };
+  return {
+    db,
+    app,
+    auth,
+    browser,
+    otps,
+    resetTokens,
+    sessionCreation,
+    exportKey: signUp.data!.exportKey,
+  };
 }
 
 async function passwordProof(browser: TestClient, password = PASSWORD): Promise<string> {
@@ -469,37 +484,147 @@ for (const advanced of [
   });
 }
 
-test("a classic-password 2FA sign-in cannot finish once an OPAQUE credential was attached", async () => {
-  const { auth, db } = await fixture({ classic: true });
-  const email = "classic@example.com";
-  const password = "classic-password";
+const CLASSIC_EMAIL = "classic@example.com";
+const CLASSIC_PASSWORD = "classic-password";
+
+/** A user of Better Auth's own email/password sign-in with TOTP, backup codes and OTP. */
+async function classicOwner(auth: Awaited<ReturnType<typeof fixture>>["auth"]) {
   const owner = createTestClient(auth);
-  expect(
-    (await owner.authClient.signUp.email({ email, password, name: "Classic" })).error,
-  ).toBeNull();
-  const enabled = await owner.authClient.twoFactor.enable({ password });
+  const signUp = await owner.authClient.signUp.email({
+    email: CLASSIC_EMAIL,
+    password: CLASSIC_PASSWORD,
+    name: "Classic",
+  });
+  expect(signUp.error).toBeNull();
+  const enabled = await owner.authClient.twoFactor.enable({ password: CLASSIC_PASSWORD });
   if (enabled.data?.method !== "totp") throw new Error("Expected TOTP setup");
   const uri = enabled.data.totpURI!;
   expect(
     (await owner.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
   ).toBeNull();
+  const generated = await owner.authClient.twoFactor.generateBackupCodes({
+    password: CLASSIC_PASSWORD,
+  });
+  expect(generated.error).toBeNull();
+  return { owner, uri, backupCode: generated.data!.backupCodes[0]! };
+}
 
-  const startNative = async (browser: TestClient) => {
-    const started = await browser.authClient.signIn.email({ email, password });
-    expect(started.data).toMatchObject({ twoFactorRedirect: true });
+async function startClassicSignIn(browser: TestClient, password = CLASSIC_PASSWORD) {
+  const started = await browser.authClient.signIn.email({ email: CLASSIC_EMAIL, password });
+  expect(started.data).toMatchObject({ twoFactorRedirect: true });
+}
+
+async function replaceClassicPassword(
+  replacement: Replacement,
+  auth: Awaited<ReturnType<typeof fixture>>["auth"],
+  owner: TestClient,
+  resetTokens: string[],
+) {
+  let error: unknown;
+  if (replacement === "change-password") {
+    ({ error } = await owner.authClient.changePassword({
+      currentPassword: CLASSIC_PASSWORD,
+      newPassword: "classic-replacement",
+    }));
+  } else {
+    const browser = createTestClient(auth);
+    const requested = await browser.authClient.requestPasswordReset({
+      email: CLASSIC_EMAIL,
+      redirectTo: "/reset",
+    });
+    ({ error } = requested.error
+      ? requested
+      : await browser.authClient.resetPassword({
+          newPassword: "classic-replacement",
+          token: resetTokens.at(-1)!,
+        }));
+  }
+  expect(error).toBeNull();
+}
+
+for (const replacement of ["reset", "change-password"] as const) {
+  for (const factor of ["totp", "otp", "backup-code"] as const) {
+    test(`a classic-password sign-in proven before Better Auth's ${replacement} cannot finish with ${factor}`, async () => {
+      const { auth, db, otps, resetTokens } = await fixture({ classic: true });
+      const { owner, uri, backupCode } = await classicOwner(auth);
+      const secrets = { uri, backupCode, otps };
+      const attacker = createTestClient(auth);
+      await startClassicSignIn(attacker);
+      await replaceClassicPassword(replacement, auth, owner, resetTokens);
+      const sessions = db.session.length;
+      const sentOtps = otps.length;
+      const challengeCookies = new Map(attacker.cookies);
+
+      const refused = await verifySecondFactor(attacker, factor, secrets);
+      expect(refused.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+      expect(otps).toHaveLength(sentOtps);
+      expect(db.session).toHaveLength(sessions);
+      expect((await attacker.authClient.getSession()).data).toBeNull();
+
+      for (const [name, value] of challengeCookies) attacker.cookies.set(name, value);
+      const replayed = await verifySecondFactor(attacker, factor, secrets);
+      expect(replayed.error?.code).toBe("INVALID_TWO_FACTOR_COOKIE");
+      expect(db.session).toHaveLength(sessions);
+
+      const browser = createTestClient(auth);
+      await startClassicSignIn(browser, "classic-replacement");
+      expect((await verifySecondFactor(browser, factor, secrets)).error).toBeNull();
+      expect((await browser.authClient.getSession()).data?.user.email).toBe(CLASSIC_EMAIL);
+    });
+  }
+}
+
+test("a classic password change inside the sign-in, after its password check, leaves the challenge stale", async () => {
+  const { auth, db, sessionCreation, resetTokens } = await fixture({ classic: true });
+  const { owner, uri } = await classicOwner(auth);
+  const attacker = createTestClient(auth);
+  // The sign-in creates its session after checking the password and before the gate's challenge.
+  sessionCreation.before = async () => {
+    sessionCreation.before = undefined;
+    await replaceClassicPassword("change-password", auth, owner, resetTokens);
   };
-  // Untouched: a native challenge without an OPAQUE credential behind it still completes.
+  await startClassicSignIn(attacker);
+  expect(sessionCreation.before).toBeUndefined();
+  const sessions = db.session.length;
+  const refused = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+  expect(refused.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+  expect(db.session).toHaveLength(sessions);
+  expect((await attacker.authClient.getSession()).data).toBeNull();
+});
+
+test("a classic password change during second-factor verification leaves no session", async () => {
+  const { auth, db, sessionCreation, resetTokens } = await fixture({ classic: true });
+  const { owner, uri } = await classicOwner(auth);
+  const attacker = createTestClient(auth);
+  await startClassicSignIn(attacker);
+  const sessions = db.session.length;
+  sessionCreation.before = async () => {
+    sessionCreation.before = undefined;
+    await replaceClassicPassword("change-password", auth, owner, resetTokens);
+  };
+  const verified = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+  expect(sessionCreation.before).toBeUndefined();
+  expect(verified.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+  expect(db.session).toHaveLength(sessions);
+  expect((await attacker.authClient.getSession()).data).toBeNull();
+});
+
+test("a classic-password 2FA sign-in cannot finish once an OPAQUE credential was attached", async () => {
+  const { auth, db } = await fixture({ classic: true });
+  const { owner, uri } = await classicOwner(auth);
+
+  // Untouched: a classic challenge still completes.
   const control = createTestClient(auth);
-  await startNative(control);
+  await startClassicSignIn(control);
   expect(
     (await control.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
   ).toBeNull();
-  expect((await control.authClient.getSession()).data?.user.email).toBe(email);
+  expect((await control.authClient.getSession()).data?.user.email).toBe(CLASSIC_EMAIL);
 
   const attacker = createTestClient(auth);
-  await startNative(attacker);
+  await startClassicSignIn(attacker);
   const attached = await owner.authClient.opaque.attachCredential({
-    currentPassword: password,
+    currentPassword: CLASSIC_PASSWORD,
     newPassword: "attached-password",
   });
   expect(attached.error).toBeNull();
@@ -513,6 +638,28 @@ test("a classic-password 2FA sign-in cannot finish once an OPAQUE credential was
   const replayed = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
   expect(replayed.error?.code).toBe("INVALID_TWO_FACTOR_COOKIE");
 });
+
+for (const origin of ["opaque", "classic"] as const) {
+  test(`a challenge without a credential binding is refused (${origin} sign-in)`, async () => {
+    const { browser: opaqueOwner, auth, db } = await fixture({ classic: true });
+    const uri =
+      origin === "opaque" ? await enableTotp(opaqueOwner) : (await classicOwner(auth)).uri;
+    const browser = createTestClient(auth);
+    if (origin === "opaque") await pendingSignIn(browser);
+    else await startClassicSignIn(browser);
+    const sessions = db.session.length;
+    const markers = db.verification.filter((row) =>
+      String(row.identifier).startsWith("opaque:two-factor-pending:"),
+    );
+    expect(markers).toHaveLength(1);
+    db.verification.splice(db.verification.indexOf(markers[0]!), 1);
+
+    const refused = await browser.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+    expect(refused.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+    expect(db.session).toHaveLength(sessions);
+    expect((await browser.authClient.getSession()).data).toBeNull();
+  });
+}
 
 test("the password proof challenge consults the account rate limit", async () => {
   const flows: string[] = [];
