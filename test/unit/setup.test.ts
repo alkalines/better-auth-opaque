@@ -63,6 +63,8 @@ describe("server setup", () => {
         loginFinalization: message,
         registrationRecord: message,
       },
+      [OPAQUE_PATHS.attachChallenge]: { registrationRequest: message },
+      [OPAQUE_PATHS.attachComplete]: { stateId: "x", registrationRecord: message },
       [OPAQUE_PATHS.resetVerify]: { token: "x" },
       [OPAQUE_PATHS.resetChallenge]: { token: "x", registrationRequest: message },
       [OPAQUE_PATHS.resetComplete]: { stateId: "x", registrationRecord: message },
@@ -85,6 +87,12 @@ describe("server setup", () => {
     });
     await expect(
       invalid.api.createPasswordResetToken({ body: { email: "setup@example.com" } }),
+    ).rejects.toMatchObject({ body: { code: "INVALID_SERVER_SETUP" } });
+    await expect(
+      invalid.api.revokePasswordResetTokens({ body: { email: "setup@example.com" } }),
+    ).rejects.toMatchObject({ body: { code: "INVALID_SERVER_SETUP" } });
+    await expect(
+      invalid.api.removeClassicCredential({ body: { userId: "x" } }),
     ).rejects.toMatchObject({ body: { code: "INVALID_SERVER_SETUP" } });
 
     await expect(valid.api.validateOpaqueSetup()).resolves.toEqual({

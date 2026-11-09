@@ -56,7 +56,7 @@ describe("sign-up and sign-in", () => {
   // seconds on shared CI runners, well past Vitest's 5 s default.
   test("the default rfc-recommended profile works end to end", { timeout: 30_000 }, async () => {
     const auth = createTestAuth({ db: createMemoryDb(), opaque: { serverSetup } });
-    const browser = createTestClient(auth);
+    const browser = createTestClient(auth, {});
     const password = "default-profile-password";
 
     const signUp = await browser.authClient.signUp.opaque({
@@ -135,7 +135,9 @@ describe("sign-up and sign-in", () => {
     expect(signIn.error).toBeNull();
     expect(signIn.data?.exportKey).toBe(signUp.data?.exportKey);
 
-    const freshSignUp = await createTestClient(after).authClient.signUp.opaque({
+    const freshSignUp = await createTestClient(after, {
+      keyStretching: { registration: [newDefault] },
+    }).authClient.signUp.opaque({
       email: "profile2@example.com",
       password: "pw-profile2",
       name: "Profile 2",
@@ -160,7 +162,9 @@ describe("sign-up and sign-in", () => {
       db: createMemoryDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
-    const browser = createTestClient(auth, { keyStretching: "memory-constrained" });
+    const browser = createTestClient(auth, {
+      keyStretching: { registration: ["memory-constrained"] },
+    });
     const result = await browser.authClient.signUp.opaque({
       email: "pinned@example.com",
       password: "pw-pinned",
@@ -397,7 +401,7 @@ describe("existing emails", () => {
 });
 
 describe("password change", () => {
-  test("revokes other sessions, keeps the current one, and retires the old password", async () => {
+  test("replaces the caller session, revokes other sessions, and retires the old password", async () => {
     const app = createPayloadApp();
     const auth = createTestAuth({
       db: createMemoryDb(),
@@ -414,6 +418,7 @@ describe("password change", () => {
     });
     await phone.authClient.signIn.opaque({ email: "change@example.com", password: "old-password" });
     expect((await phone.authClient.getSession()).data?.user.email).toBe("change@example.com");
+    const oldToken = (await laptop.authClient.getSession()).data!.session.token;
 
     const wrong = await laptop.authClient.opaque.changePassword({
       currentPassword: "not-the-password",
@@ -428,6 +433,8 @@ describe("password change", () => {
     });
     expect(changed.error).toBeNull();
     expect(changed.data?.status).toBe(true);
+    expect(changed.data?.token).toEqual(expect.any(String));
+    expect(changed.data?.token).not.toBe(oldToken);
 
     expect((await laptop.authClient.getSession()).data?.user.email).toBe("change@example.com");
     expect((await phone.authClient.getSession()).data).toBeNull();

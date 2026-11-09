@@ -1,12 +1,13 @@
 // `runWithTransaction` is only exported by `@better-auth/core`; it is what lets internalAdapter
 // writes (and the database hooks they run) join one transaction on adapters that support them.
 import { runWithTransaction } from "@better-auth/core/context";
-import { BASE_ERROR_CODES, type User } from "better-auth";
-import { APIError, createAuthEndpoint, isAPIError } from "better-auth/api";
+import { BASE_ERROR_CODES, type GenericEndpointContext, type User } from "better-auth";
+import { APIError, createAuthEndpoint, formCsrfMiddleware, isAPIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { parseUserInput, parseUserOutput } from "better-auth/db";
 import {
   OPAQUE_ACCOUNT_FIELDS,
+  OPAQUE_ERROR_CODES,
   OPAQUE_PATHS,
   OPAQUE_PROVIDER_ID,
   signUpChallengeBodySchema,
@@ -22,17 +23,35 @@ import {
 import type { OpaqueRuntime } from "./runtime.ts";
 import { consumeState, createState } from "./state.ts";
 
-/** `POST /sign-up/opaque/challenge` and `/sign-up/opaque/complete`. */
+/**
+ * Rejects sign-up when it is closed: the plugin option wins, otherwise Better Auth's
+ * `emailAndPassword.disableSignUp` applies, so one switch closes both sign-up paths.
+ */
+function assertSignUpEnabled(ctx: GenericEndpointContext, runtime: OpaqueRuntime): void {
+  const disabled =
+    runtime.disableSignUp ?? ctx.context.options.emailAndPassword?.disableSignUp === true;
+  if (disabled) {
+    throw APIError.from("BAD_REQUEST", OPAQUE_ERROR_CODES.SIGN_UP_DISABLED);
+  }
+}
+
+/**
+ * `POST /sign-up/opaque/challenge` and `/sign-up/opaque/complete`. Both carry Better Auth's
+ * first-login CSRF check (`formCsrfMiddleware`), like `/sign-up/email`: the session cookie they set
+ * must not be obtainable from a cross-site request.
+ */
 export function signUpEndpoints(runtime: OpaqueRuntime) {
   const signUpOpaqueChallenge = createAuthEndpoint(
     OPAQUE_PATHS.signUpChallenge,
     {
       method: "POST",
       body: signUpChallengeBodySchema,
+      use: [formCsrfMiddleware],
       metadata: { scope: "server" },
     },
     async (ctx) => {
       await runtime.requireServerPublicKey();
+      assertSignUpEnabled(ctx, runtime);
       const email = ctx.body.email.toLowerCase();
 
       // Same disclosure as email/password sign-up: when that route would answer
@@ -74,10 +93,13 @@ export function signUpEndpoints(runtime: OpaqueRuntime) {
     {
       method: "POST",
       body: signUpCompleteBodySchema,
+      use: [formCsrfMiddleware],
       metadata: { scope: "server" },
     },
     async (ctx) => {
       await runtime.requireServerPublicKey();
+      // Re-checked here: a challenge issued before sign-up was closed must not complete.
+      assertSignUpEnabled(ctx, runtime);
       const { hooks } = runtime;
       const {
         stateId,
@@ -95,6 +117,7 @@ export function signUpEndpoints(runtime: OpaqueRuntime) {
       const additionalUserFields = parseUserInput(ctx.context.options, additionalFields, "create");
 
       const state = await consumeState(ctx, "sign-up", stateId);
+      await runtime.validateRegistrationRecord(state.credentialId, registrationRecord);
       await validatePayload(hooks, { payload, flow: "sign-up" }, ctx);
 
       const hideExistingEmails = hidesExistingEmails(ctx);

@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only: run it from the Actions tab ("Run workflow") or `gh workflow run ci.yml`.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

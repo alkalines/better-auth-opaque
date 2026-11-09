@@ -1,6 +1,7 @@
 export { opaque } from "./server/index.ts";
-export type { OpaqueOptions } from "./server/index.ts";
+export type { OpaqueOptions, OpaqueRateLimitedFlow } from "./server/index.ts";
 export {
+  ARGON2ID_CUSTOM_LIMITS,
   DEFAULT_KEY_STRETCHING,
   OPAQUE_ERROR_CODES,
   OPAQUE_PATHS,
@@ -8,6 +9,7 @@ export {
 } from "./contract.ts";
 export type {
   CreatePasswordResetTokenResponse,
+  OpaqueCredentialChangeFlow,
   OpaqueErrorCode,
   OpaqueFlow,
   OpaqueHookContext,

@@ -2,41 +2,66 @@
  * Better Auth client plugin for OPAQUE password authentication. Every action runs the serenity
  * OPAQUE client locally and performs the challenge and complete round trips itself.
  *
- * Secret handling: the password is only passed to serenity and never appears in a request; the
- * export key is derived locally, never sent, and returned to the caller only after the matching
- * complete call succeeded (RFC 9807 §10.4). The session key is never used as an export key.
+ * Secret handling: the OPAQUE password is only passed to serenity and never appears in a request.
+ * Attaching may send the existing classic password, never the new OPAQUE password. The export key
+ * stays local and is returned only after complete succeeds (RFC 9807 §10.4); it is never a session key.
  */
 import type * as Serenity from "@serenity-kit/opaque";
 import type { BetterAuthClientPlugin, BetterFetchOption, User } from "better-auth/client";
-import type * as z from "zod";
+import * as z from "zod";
 import {
   OPAQUE_ERROR_CODES,
   OPAQUE_PATHS,
   OPAQUE_PLUGIN_ID,
   type CredentialUpdateResponse,
+  type ChangePasswordResponse,
   type OpaqueKeyStretching,
   type ResetVerifyResponse,
   type PasswordProofResponse,
   type SignInPayloadResponse,
   type SignInCompleteResponse,
   type SignUpCompleteResponse,
-  type changePasswordChallengeResponseSchema,
-  type resetChallengeResponseSchema,
-  type signInChallengeResponseSchema,
-  type passwordProofChallengeResponseSchema,
-  type signUpChallengeResponseSchema,
+  attachChallengeResponseSchema,
+  changePasswordChallengeResponseSchema,
+  keyStretchingSchema,
+  resetChallengeResponseSchema,
+  signInChallengeResponseSchema,
+  passwordProofChallengeResponseSchema,
+  signUpChallengeResponseSchema,
 } from "../contract.ts";
 
-/** Options of {@link opaqueClient}. */
-export type OpaqueClientOptions = {
+/** Named serenity profiles with at least `memory-constrained` strength and bounded memory (about 2 GiB). */
+export const DEFAULT_ALLOWED_KEY_STRETCHING: readonly OpaqueKeyStretching[] = Object.freeze([
+  "rfc-recommended",
+  "rfc-draft-recommended",
+  "memory-constrained",
+]);
+
+/** Client-controlled allowlists checked before deriving any key from a server challenge. */
+export type OpaqueKeyStretchingPolicy = {
+  /** Profiles accepted for sign-up, attach, change and reset. Defaults to {@link DEFAULT_ALLOWED_KEY_STRETCHING}. */
+  registration?: readonly OpaqueKeyStretching[];
   /**
-   * Pins the key-stretching profile for new registrations (sign-up, change, reset). When set and
-   * the server advertises a different profile, the action fails with `KEY_STRETCHING_MISMATCH`
-   * before anything is sent to the complete endpoint. Sign-in always uses the profile the server
-   * stored for the account.
+   * Profiles accepted for sign-in, password proof and the current password during a change.
+   * Defaults to {@link DEFAULT_ALLOWED_KEY_STRETCHING} plus every registration profile.
+   * An explicit list replaces that default, allowing older stored profiles to be retired.
    */
-  keyStretching?: OpaqueKeyStretching;
+  login?: readonly OpaqueKeyStretching[];
 };
+
+/** Options of {@link opaqueClient}; invalid options throw at plugin construction. */
+export type OpaqueClientOptions = {
+  keyStretching?: OpaqueKeyStretchingPolicy;
+};
+
+const clientOptionsSchema = z.strictObject({
+  keyStretching: z
+    .strictObject({
+      registration: z.array(keyStretchingSchema).min(1).optional(),
+      login: z.array(keyStretchingSchema).min(1).optional(),
+    })
+    .optional(),
+});
 
 /**
  * Better Fetch options applied to every request of an action. `onSuccess` and `onError` only run
@@ -102,6 +127,18 @@ export type OpaqueResetPasswordInput = {
   fetchOptions?: OpaqueFetchOptions;
 };
 
+/**
+ * Input of `opaque.attachCredential`; requires a session for a classic email/password user.
+ * Only `currentPassword` (the classic password) is sent to the server. The new OPAQUE password
+ * must differ; when `currentPassword` is omitted the client cannot check for password reuse.
+ */
+export type OpaqueAttachCredentialInput = {
+  newPassword: string;
+  currentPassword?: string;
+  payload?: OpaquePayloadInput;
+  fetchOptions?: OpaqueFetchOptions;
+};
+
 /** Input of `authClient.opaque.verifyResetToken`. */
 export type OpaqueVerifyResetTokenInput = {
   token: string;
@@ -131,18 +168,19 @@ export type OpaqueSignUpData = WithExportKey<SignUpCompleteResponse<User>>;
 /** A completed OPAQUE proof, with either a session/payload or a pending second-factor challenge. */
 export type OpaqueSignInData = WithExportKey<SignInCompleteResponse<User>>;
 export type OpaqueCredentialUpdateData = WithExportKey<CredentialUpdateResponse>;
+/** Password change result, including the replacement session token and new credential export key. */
+export type OpaqueChangePasswordData = WithExportKey<ChangePasswordResponse>;
+/** First OPAQUE credential result, including the replacement session token and export key. */
+export type OpaqueAttachCredentialData = WithExportKey<ChangePasswordResponse>;
 
 type SignUpChallengeResponse = z.infer<typeof signUpChallengeResponseSchema>;
 type SignInChallengeResponse = z.infer<typeof signInChallengeResponseSchema>;
 type ChangePasswordChallengeResponse = z.infer<typeof changePasswordChallengeResponseSchema>;
 type ResetChallengeResponse = z.infer<typeof resetChallengeResponseSchema>;
 type PasswordProofChallengeResponse = z.infer<typeof passwordProofChallengeResponseSchema>;
+type AttachChallengeResponse = z.infer<typeof attachChallengeResponseSchema>;
 
-/**
- * Error for a failure detected locally, before any complete call. Status and status text mirror
- * what Better Auth sends for the same code, so a local sign-in failure (wrong password or fake
- * record) looks like a server-side one.
- */
+/** Shared lazy WASM load; importing the client entry itself performs no cryptographic work. */
 let serenityLoad: Promise<typeof Serenity> | undefined;
 
 /**
@@ -157,8 +195,17 @@ function loadSerenity(): Promise<typeof Serenity> {
   return serenityLoad;
 }
 
+/**
+ * Local protocol failures retain Better Auth's status conventions. Malformed challenges and
+ * serenity processing exceptions use `INVALID_SERVER_RESPONSE` with 502 `BAD_GATEWAY`.
+ */
 function localError(
-  code: "INVALID_CREDENTIALS" | "INVALID_PASSWORD" | "KEY_STRETCHING_MISMATCH",
+  code:
+    | "INVALID_CREDENTIALS"
+    | "INVALID_PASSWORD"
+    | "KEY_STRETCHING_MISMATCH"
+    | "INVALID_SERVER_RESPONSE"
+    | "PASSWORD_REUSED",
   status: number,
   statusText: string,
 ): { data: null; error: OpaqueClientError } {
@@ -186,41 +233,71 @@ function keyStretchingMismatch(): { data: null; error: OpaqueClientError } {
 }
 
 /**
- * Finishes a registration locally: checks the pinned profile, runs serenity's
- * `finishRegistration` with the server-advertised profile and identifiers, then resolves the
- * payload (calling it with the export key when it is a callback). Returns `null` when the
- * advertised profile differs from the pinned one; nothing has been sent at that point.
+ * Finishes an allowed registration and resolves its app payload. Only serenity exceptions are
+ * converted to protocol errors; payload callback exceptions remain application failures.
  */
 async function finishRegistration(input: {
   password: string;
   clientRegistrationState: string;
   challenge: SignUpChallengeResponse | ResetChallengeResponse | ChangePasswordChallengeResponse;
   payload: OpaquePayloadInput;
-  pinnedKeyStretching: OpaqueKeyStretching | undefined;
-}): Promise<{ registrationRecord: string; exportKey: string; payload: unknown } | null> {
-  const { challenge, pinnedKeyStretching } = input;
+  allowedKeyStretching: readonly OpaqueKeyStretching[];
+}): Promise<
+  OpaqueClientResult<{ registrationRecord: string; exportKey: string; payload: unknown }>
+> {
+  const { challenge } = input;
   if (
-    pinnedKeyStretching !== undefined &&
-    !sameKeyStretching(pinnedKeyStretching, challenge.keyStretching)
+    !input.allowedKeyStretching.some((profile) =>
+      sameKeyStretching(profile, challenge.keyStretching),
+    )
   ) {
-    return null;
+    return keyStretchingMismatch();
   }
   const { client } = await loadSerenity();
-  const { registrationRecord, exportKey } = client.finishRegistration({
-    password: input.password,
-    registrationResponse: challenge.registrationResponse,
-    clientRegistrationState: input.clientRegistrationState,
-    keyStretching: challenge.keyStretching,
-    identifiers: serverIdentifiers(challenge.serverIdentifier),
-  });
+  let finished: Serenity.client.FinishRegistrationResult;
+  try {
+    finished = client.finishRegistration({
+      password: input.password,
+      registrationResponse: challenge.registrationResponse,
+      clientRegistrationState: input.clientRegistrationState,
+      keyStretching: challenge.keyStretching,
+      identifiers: serverIdentifiers(challenge.serverIdentifier),
+    });
+  } catch {
+    return localError("INVALID_SERVER_RESPONSE", 502, "BAD_GATEWAY");
+  }
   const payload =
-    typeof input.payload === "function" ? await input.payload(exportKey) : input.payload;
-  return { registrationRecord, exportKey, payload };
+    typeof input.payload === "function" ? await input.payload(finished.exportKey) : input.payload;
+  return { data: { ...finished, payload }, error: null };
 }
 
-/** Better Auth client plugin for the `opaque` server plugin. */
+/** Isolates untrusted login-response processing; an undefined result still means wrong password. */
+function finishLogin(
+  client: typeof Serenity.client,
+  input: Serenity.client.FinishLoginParams,
+): OpaqueClientResult<Serenity.client.FinishLoginResult | undefined> {
+  try {
+    return { data: client.finishLogin(input), error: null };
+  } catch {
+    return localError("INVALID_SERVER_RESPONSE", 502, "BAD_GATEWAY");
+  }
+}
+
+/**
+ * Better Auth client plugin for the `opaque` server plugin. Server-advertised profiles must
+ * match the local policy exactly before key derivation; invalid configuration throws an Error.
+ */
 export function opaqueClient(options?: OpaqueClientOptions) {
-  const pinnedKeyStretching = options?.keyStretching;
+  const parsedOptions = clientOptionsSchema.safeParse(options === undefined ? {} : options);
+  if (!parsedOptions.success) {
+    throw new Error(`Invalid opaqueClient options: ${parsedOptions.error.message}`);
+  }
+  const registrationProfiles =
+    parsedOptions.data.keyStretching?.registration ?? DEFAULT_ALLOWED_KEY_STRETCHING;
+  const loginProfiles = parsedOptions.data.keyStretching?.login ?? [
+    ...DEFAULT_ALLOWED_KEY_STRETCHING,
+    ...registrationProfiles,
+  ];
 
   return {
     id: OPAQUE_PLUGIN_ID,
@@ -243,6 +320,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
         body: Record<string, unknown>,
         fetchOptions: OpaqueFetchOptions | undefined,
         step: "challenge" | "complete",
+        responseSchema?: z.ZodType<T>,
       ): Promise<OpaqueClientResult<T>> {
         let requestOptions = fetchOptions ?? {};
         if (step === "challenge") {
@@ -257,6 +335,11 @@ export function opaqueClient(options?: OpaqueClientOptions) {
         });
         if (result.error) {
           return { data: null, error: result.error as OpaqueClientError };
+        }
+        if (responseSchema) {
+          const parsed = responseSchema.safeParse(result.data);
+          if (!parsed.success) return localError("INVALID_SERVER_RESPONSE", 502, "BAD_GATEWAY");
+          return { data: parsed.data, error: null };
         }
         return { data: result.data as T, error: null };
       }
@@ -279,6 +362,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               { email, registrationRequest: registration.registrationRequest },
               fetchOptions,
               "challenge",
+              signUpChallengeResponseSchema,
             );
             if (challenge.error) {
               return challenge;
@@ -289,10 +373,10 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               clientRegistrationState: registration.clientRegistrationState,
               challenge: challenge.data,
               payload,
-              pinnedKeyStretching,
+              allowedKeyStretching: registrationProfiles,
             });
-            if (!finished) {
-              return keyStretchingMismatch();
+            if (finished.error) {
+              return finished;
             }
 
             const complete = await post<SignUpCompleteResponse<User>>(
@@ -300,8 +384,8 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               {
                 ...userFields,
                 stateId: challenge.data.stateId,
-                registrationRecord: finished.registrationRecord,
-                payload: finished.payload,
+                registrationRecord: finished.data.registrationRecord,
+                payload: finished.data.payload,
               },
               fetchOptions,
               "complete",
@@ -310,7 +394,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               return complete;
             }
             $store.notify("$sessionSignal");
-            return { data: { ...complete.data, exportKey: finished.exportKey }, error: null };
+            return { data: { ...complete.data, exportKey: finished.data.exportKey }, error: null };
           },
         },
 
@@ -320,6 +404,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
            * same `INVALID_CREDENTIALS` error; when the local OPAQUE step already fails, no
            * complete request is made. A 2FA redirect also returns the locally derived export key,
            * but never a session or payload; verify the second factor, then call loadSignInPayload.
+           * The server's stored profile must be accepted by the local login policy.
            */
           opaque: async (
             input: OpaqueSignInInput,
@@ -332,18 +417,28 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               { email: input.email, loginRequest: login.startLoginRequest },
               input.fetchOptions,
               "challenge",
+              signInChallengeResponseSchema,
             );
             if (challenge.error) {
               return challenge;
             }
 
-            const finished = client.finishLogin({
+            if (
+              !loginProfiles.some((profile) =>
+                sameKeyStretching(profile, challenge.data.keyStretching),
+              )
+            ) {
+              return keyStretchingMismatch();
+            }
+            const processed = finishLogin(client, {
               clientLoginState: login.clientLoginState,
               loginResponse: challenge.data.loginResponse,
               password: input.password,
               keyStretching: challenge.data.keyStretching,
               identifiers: serverIdentifiers(challenge.data.serverIdentifier),
             });
+            if (processed.error) return processed;
+            const finished = processed.data;
             if (!finished) {
               return localError("INVALID_CREDENTIALS", 401, "UNAUTHORIZED");
             }
@@ -368,6 +463,62 @@ export function opaqueClient(options?: OpaqueClientOptions) {
 
         opaque: {
           /**
+           * Attaches a first OPAQUE credential to a signed-in classic email/password user.
+           * `newPassword` stays local. `currentPassword` is sent only to the challenge endpoint
+           * and must differ from the new password, since the server knows the classic password.
+           * When omitted (if the server allows fresh sessions), reuse cannot be checked locally.
+           * The registration policy is enforced before derivation or payload construction.
+           * All sessions are replaced with a new caller session; the export key is returned only
+           * after complete succeeds. A failed challenge/complete requires restarting the action.
+           */
+          attachCredential: async (
+            input: OpaqueAttachCredentialInput,
+          ): Promise<OpaqueClientResult<OpaqueAttachCredentialData>> => {
+            if (
+              input.currentPassword !== undefined &&
+              input.currentPassword === input.newPassword
+            ) {
+              return localError("PASSWORD_REUSED", 400, "BAD_REQUEST");
+            }
+            const { client } = await loadSerenity();
+            const registration = client.startRegistration({ password: input.newPassword });
+            const challenge = await post<AttachChallengeResponse>(
+              OPAQUE_PATHS.attachChallenge,
+              {
+                registrationRequest: registration.registrationRequest,
+                currentPassword: input.currentPassword,
+              },
+              input.fetchOptions,
+              "challenge",
+              attachChallengeResponseSchema,
+            );
+            if (challenge.error) return challenge;
+
+            const finished = await finishRegistration({
+              password: input.newPassword,
+              clientRegistrationState: registration.clientRegistrationState,
+              challenge: challenge.data,
+              payload: input.payload,
+              allowedKeyStretching: registrationProfiles,
+            });
+            if (finished.error) return finished;
+
+            const complete = await post<ChangePasswordResponse>(
+              OPAQUE_PATHS.attachComplete,
+              {
+                stateId: challenge.data.stateId,
+                registrationRecord: finished.data.registrationRecord,
+                payload: finished.data.payload,
+              },
+              input.fetchOptions,
+              "complete",
+            );
+            if (complete.error) return complete;
+            $store.notify("$sessionSignal");
+            return { data: { ...complete.data, exportKey: finished.data.exportKey }, error: null };
+          },
+
+          /**
            * Loads the credential payload after successful Better Auth second-factor verification.
            * The token is single use, including failed authenticated attempts; retry sign-in if lost.
            */
@@ -384,6 +535,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
           /**
            * Proves the password locally for one 2FA management request. Pass `proof` as that
            * method's `password`; it expires in five minutes and is consumed even on rejection.
+           * The server's stored profile must be accepted by the local login policy.
            */
           createPasswordProof: async (
             input: OpaqueCreatePasswordProofInput,
@@ -395,15 +547,25 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               { loginRequest: login.startLoginRequest },
               input.fetchOptions,
               "challenge",
+              passwordProofChallengeResponseSchema,
             );
             if (challenge.error) return challenge;
-            const finished = client.finishLogin({
+            if (
+              !loginProfiles.some((profile) =>
+                sameKeyStretching(profile, challenge.data.keyStretching),
+              )
+            ) {
+              return keyStretchingMismatch();
+            }
+            const processed = finishLogin(client, {
               clientLoginState: login.clientLoginState,
               loginResponse: challenge.data.loginResponse,
               password: input.password,
               keyStretching: challenge.data.keyStretching,
               identifiers: serverIdentifiers(challenge.data.serverIdentifier),
             });
+            if (processed.error) return processed;
+            const finished = processed.data;
             if (!finished) return localError("INVALID_PASSWORD", 400, "BAD_REQUEST");
             return post<PasswordProofResponse>(
               OPAQUE_PATHS.passwordProofComplete,
@@ -415,12 +577,13 @@ export function opaqueClient(options?: OpaqueClientOptions) {
 
           /**
            * Changes the password of the signed-in user: proves the current password and
-           * registers the new one in a single challenge/complete pair. Other sessions are
-           * revoked; the current one stays.
+           * registers the new one in a single challenge/complete pair. Both profiles must be
+           * accepted before either derivation runs. All sessions are revoked and replaced with
+           * a new caller session, whose token is returned and set as a cookie.
            */
           changePassword: async (
             input: OpaqueChangePasswordInput,
-          ): Promise<OpaqueClientResult<OpaqueCredentialUpdateData>> => {
+          ): Promise<OpaqueClientResult<OpaqueChangePasswordData>> => {
             const { client } = await loadSerenity();
 
             const login = client.startLogin({ password: input.currentPassword });
@@ -433,18 +596,31 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               },
               input.fetchOptions,
               "challenge",
+              changePasswordChallengeResponseSchema,
             );
             if (challenge.error) {
               return challenge;
             }
 
-            const proven = client.finishLogin({
+            if (
+              !loginProfiles.some((profile) =>
+                sameKeyStretching(profile, challenge.data.loginKeyStretching),
+              ) ||
+              !registrationProfiles.some((profile) =>
+                sameKeyStretching(profile, challenge.data.keyStretching),
+              )
+            ) {
+              return keyStretchingMismatch();
+            }
+            const processed = finishLogin(client, {
               clientLoginState: login.clientLoginState,
               loginResponse: challenge.data.loginResponse,
               password: input.currentPassword,
               keyStretching: challenge.data.loginKeyStretching,
               identifiers: serverIdentifiers(challenge.data.serverIdentifier),
             });
+            if (processed.error) return processed;
+            const proven = processed.data;
             if (!proven) {
               return localError("INVALID_PASSWORD", 400, "BAD_REQUEST");
             }
@@ -454,19 +630,19 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               clientRegistrationState: registration.clientRegistrationState,
               challenge: challenge.data,
               payload: input.payload,
-              pinnedKeyStretching,
+              allowedKeyStretching: registrationProfiles,
             });
-            if (!finished) {
-              return keyStretchingMismatch();
+            if (finished.error) {
+              return finished;
             }
 
-            const complete = await post<CredentialUpdateResponse>(
+            const complete = await post<ChangePasswordResponse>(
               OPAQUE_PATHS.changePasswordComplete,
               {
                 stateId: challenge.data.stateId,
                 loginFinalization: proven.finishLoginRequest,
-                registrationRecord: finished.registrationRecord,
-                payload: finished.payload,
+                registrationRecord: finished.data.registrationRecord,
+                payload: finished.data.payload,
               },
               input.fetchOptions,
               "complete",
@@ -475,7 +651,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               return complete;
             }
             $store.notify("$sessionSignal");
-            return { data: { ...complete.data, exportKey: finished.exportKey }, error: null };
+            return { data: { ...complete.data, exportKey: finished.data.exportKey }, error: null };
           },
 
           /**
@@ -493,6 +669,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               { token: input.token, registrationRequest: registration.registrationRequest },
               input.fetchOptions,
               "challenge",
+              resetChallengeResponseSchema,
             );
             if (challenge.error) {
               return challenge;
@@ -503,18 +680,18 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               clientRegistrationState: registration.clientRegistrationState,
               challenge: challenge.data,
               payload: input.payload,
-              pinnedKeyStretching,
+              allowedKeyStretching: registrationProfiles,
             });
-            if (!finished) {
-              return keyStretchingMismatch();
+            if (finished.error) {
+              return finished;
             }
 
             const complete = await post<CredentialUpdateResponse>(
               OPAQUE_PATHS.resetComplete,
               {
                 stateId: challenge.data.stateId,
-                registrationRecord: finished.registrationRecord,
-                payload: finished.payload,
+                registrationRecord: finished.data.registrationRecord,
+                payload: finished.data.payload,
               },
               input.fetchOptions,
               "complete",
@@ -523,7 +700,7 @@ export function opaqueClient(options?: OpaqueClientOptions) {
               return complete;
             }
             $store.notify("$sessionSignal");
-            return { data: { ...complete.data, exportKey: finished.exportKey }, error: null };
+            return { data: { ...complete.data, exportKey: finished.data.exportKey }, error: null };
           },
 
           /**

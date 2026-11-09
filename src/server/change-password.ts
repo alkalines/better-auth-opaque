@@ -7,12 +7,20 @@ import {
 } from "../contract.ts";
 import { assertPayloadSupported, findCredentialByUserId, replaceCredential } from "./credential.ts";
 import type { OpaqueRuntime } from "./runtime.ts";
+import { reissueSession } from "./session.ts";
 import { consumeState, createState } from "./state.ts";
 
 /**
  * `POST /opaque/change-password/challenge` and `/opaque/change-password/complete`. Both require a
  * session read from the session store (not the cookie cache), and the complete call requires a
  * fresh OPAQUE proof of the current password, so a stolen session alone cannot change it.
+ *
+ * Like Better Auth's `changePassword` with `revokeOtherSessions`, a successful change deletes
+ * every session of the user (exhaustively, including secondary storage) and signs the caller in
+ * again with a new session, returned as `token` and set as the session cookie. When
+ * `activatePayload` throws after the credential switched, all sessions are still revoked and the
+ * error is returned without a replacement session: the new password is in effect, so the caller
+ * signs in again. This avoids depending on cookies surviving a non-API error.
  */
 export function changePasswordEndpoints(runtime: OpaqueRuntime) {
   const opaqueChangePasswordChallenge = createAuthEndpoint(
@@ -25,7 +33,9 @@ export function changePasswordEndpoints(runtime: OpaqueRuntime) {
     },
     async (ctx) => {
       await runtime.requireServerPublicKey();
-      const userId = ctx.context.session.user.id;
+      const { user } = ctx.context.session;
+      await runtime.checkAccountRateLimit(ctx, user.email, "change-password");
+      const userId = user.id;
 
       const credential = await findCredentialByUserId(ctx, userId);
       if (!credential) {
@@ -83,26 +93,21 @@ export function changePasswordEndpoints(runtime: OpaqueRuntime) {
         throw APIError.from("BAD_REQUEST", OPAQUE_ERROR_CODES.INVALID_PASSWORD);
       }
 
-      await replaceCredential(ctx, runtime, {
+      const credentialVersion = await replaceCredential(ctx, runtime, {
         flow: "change-password",
         credentialId: state.credentialId,
         expectedVersion: state.credentialVersion,
         registrationRecord,
         keyStretching: state.keyStretching,
         payload,
-        // Sessions created with the old password end; the session that proved it stays.
-        revokeSessions: async () => {
-          const sessions = await ctx.context.internalAdapter.listSessions(session.user.id);
-          const otherTokens = sessions
-            .map((other) => other.token)
-            .filter((token) => token !== session.session.token);
-          if (otherTokens.length > 0) {
-            await ctx.context.internalAdapter.deleteSessions(otherTokens);
-          }
-        },
       });
 
-      return ctx.json({ status: true as const });
+      return ctx.json(
+        await reissueSession(ctx, session.user, {
+          credentialId: state.credentialId,
+          credentialVersion,
+        }),
+      );
     },
   );
 

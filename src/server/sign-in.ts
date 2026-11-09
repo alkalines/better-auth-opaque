@@ -1,5 +1,5 @@
-import { BASE_ERROR_CODES } from "better-auth";
-import { APIError, createAuthEndpoint } from "better-auth/api";
+import { BASE_ERROR_CODES, type GenericEndpointContext } from "better-auth";
+import { APIError, createAuthEndpoint, formCsrfMiddleware } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { parseUserOutput } from "better-auth/db";
 import {
@@ -21,29 +21,60 @@ function invalidCredentials(): APIError {
   return APIError.from("UNAUTHORIZED", OPAQUE_ERROR_CODES.INVALID_CREDENTIALS);
 }
 
-/** `POST /sign-in/opaque/challenge` and `/sign-in/opaque/complete`. */
+/**
+ * A user id that no row has, in the format the database expects for `account.userId`, so the miss
+ * path can run the same query as the hit path without a type error (e.g. a non-UUID string
+ * against a Postgres `uuid` column) turning unknown emails into a distinguishable 500. The
+ * `absentUserId` option takes precedence for id formats this cannot derive.
+ */
+function absentUserId(ctx: GenericEndpointContext, runtime: OpaqueRuntime): string {
+  if (runtime.absentUserId !== undefined) {
+    return runtime.absentUserId;
+  }
+  // Serial ids start at 1.
+  if (ctx.context.options.advanced?.database?.generateId === "serial") {
+    return "0";
+  }
+  // A freshly generated id is unused; `false` means the database assigns ids, where a UUID
+  // compares safely against both text and uuid columns (and Mongo keeps non-ObjectId strings).
+  const generated = ctx.context.generateId({ model: "user" });
+  return typeof generated === "string" ? generated : crypto.randomUUID();
+}
+
+/**
+ * `POST /sign-in/opaque/challenge` and `/sign-in/opaque/complete`. Both carry Better Auth's
+ * first-login CSRF check (`formCsrfMiddleware`), like `/sign-in/email`.
+ */
 export function signInEndpoints(runtime: OpaqueRuntime) {
   const signInOpaqueChallenge = createAuthEndpoint(
     OPAQUE_PATHS.signInChallenge,
     {
       method: "POST",
       body: signInChallengeBodySchema,
+      use: [formCsrfMiddleware],
       metadata: { scope: "server" },
     },
     async (ctx) => {
       await runtime.requireServerPublicKey();
       const email = ctx.body.email.toLowerCase();
+      // Before any lookup, and keyed the same way for unknown emails, so a refusal reveals nothing.
+      await runtime.checkAccountRateLimit(ctx, email, "sign-in");
 
       // Enumeration resistance: unknown emails and users without an OPAQUE credential get a fake
       // login keyed by a secret-derived identifier, so the response is stable per email and has
       // the same shape as a real one. The HMAC is computed on both paths to keep the work equal.
       const fakeIdentifier = await hmacSha256(ctx.context.secret, `opaque/fake/${email}`);
-      const found = await ctx.context.internalAdapter.findUserByEmail(email, {
-        includeAccounts: true,
-      });
-      const credential = readCredential(
-        found?.accounts.find((account) => account.providerId === OPAQUE_PROVIDER_ID),
+      const found = await ctx.context.internalAdapter.findUserByEmail(email);
+      // Exactly one account query follows the user lookup on both paths, and it is the same
+      // indexed `account.userId` lookup. `includeAccounts` would skip it for unknown emails on
+      // adapters without native joins (e.g. Convex), and a lookup by `accountId` (not indexed in
+      // Better Auth's schema) would make unknown emails slower on SQL databases.
+      const accounts = await ctx.context.internalAdapter.findAccounts(
+        found?.user.id ?? absentUserId(ctx, runtime),
       );
+      const credential = found
+        ? readCredential(accounts.find((account) => account.providerId === OPAQUE_PROVIDER_ID))
+        : null;
 
       const { serverLoginState, loginResponse } = await runtime.startLogin(
         credential?.credentialId ?? fakeIdentifier,
@@ -73,6 +104,7 @@ export function signInEndpoints(runtime: OpaqueRuntime) {
     {
       method: "POST",
       body: signInCompleteBodySchema,
+      use: [formCsrfMiddleware],
       metadata: { scope: "server" },
     },
     async (ctx) => {

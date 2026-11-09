@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "vitest";
+import type { OpaqueHooks } from "../../src/contract.ts";
 import {
   CHEAP_STRETCHING,
   createMemoryDb,
@@ -137,5 +138,71 @@ describe("concurrent credential replacement", () => {
     expect(result.error?.code).toBe("INVALID_CREDENTIALS");
     expect(db.session).toHaveLength(0);
     expect((await attacker.authClient.getSession()).data).toBeNull();
+  });
+
+  test("a password change whose replacement session loses to a reset leaves no session", async () => {
+    const app = createPayloadApp();
+    const db = createMemoryDb();
+    // Hold the change's activatePayload (after its switch) open once; the reset's is not held.
+    const changeSwitched = gate();
+    const resetDone = gate();
+    let armed = false;
+    const hooks: OpaqueHooks = {
+      ...app.hooks,
+      activatePayload: async (input, ctx) => {
+        if (armed) {
+          armed = false;
+          changeSwitched.open();
+          await resetDone.opened;
+        }
+        await app.hooks.activatePayload?.(input, ctx);
+      },
+    };
+    const auth = createTestAuth({
+      db,
+      opaque: {
+        serverSetup,
+        keyStretching: CHEAP_STRETCHING,
+        hooks,
+        passwordReset: { url: (token) => `http://localhost:3000/reset?token=${token}` },
+      },
+    });
+    const email = "race@example.com";
+    const owner = createTestClient(auth);
+    const signUp = await owner.authClient.signUp.opaque({
+      email,
+      password: "old-password",
+      name: "Race",
+      payload: { tag: "old" },
+    });
+    expect(signUp.error).toBeNull();
+    armed = true;
+
+    const changing = owner.authClient.opaque.changePassword({
+      currentPassword: "old-password",
+      newPassword: "changed-password",
+    });
+    await changeSwitched.opened;
+
+    const { url } = await auth.api.createPasswordResetToken({ body: { email } });
+    const reset = await createTestClient(auth).authClient.opaque.resetPassword({
+      token: new URL(url).searchParams.get("token")!,
+      newPassword: "reset-password",
+    });
+    expect(reset.error).toBeNull();
+    resetDone.open();
+
+    const changed = await changing;
+    expect(changed.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+    expect(db.session).toHaveLength(0);
+    expect((await owner.authClient.getSession()).data).toBeNull();
+
+    const browser = createTestClient(auth);
+    expect(
+      (await browser.authClient.signIn.opaque({ email, password: "reset-password" })).error,
+    ).toBeNull();
+    expect(
+      (await browser.authClient.signIn.opaque({ email, password: "changed-password" })).error?.code,
+    ).toBe("INVALID_CREDENTIALS");
   });
 });
