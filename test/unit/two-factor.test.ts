@@ -1,12 +1,12 @@
 import { base32 } from "@better-auth/utils/base32";
 import { createOTP } from "@better-auth/utils/otp";
 import { client as opaqueProtocol } from "@serenity-kit/opaque";
-import { betterAuth } from "better-auth";
+import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { twoFactor } from "better-auth/plugins";
 import { expect, test } from "vitest";
 import { OPAQUE_PATHS } from "../../src/contract.ts";
-import { opaque } from "../../src/server/index.ts";
+import { opaque, type OpaqueOptions } from "../../src/server/index.ts";
 import {
   BASE_URL,
   CHEAP_STRETCHING,
@@ -24,7 +24,15 @@ const EMAIL = "2fa@example.com";
 const PASSWORD = "2fa-password-never-transmitted";
 const PAYLOAD = { ciphertext: "credential-bound-encrypted-app-payload" };
 
-async function fixture(input?: { missingHook?: boolean; opaqueFirst?: boolean; maxAge?: number }) {
+async function fixture(input?: {
+  missingHook?: boolean;
+  opaqueFirst?: boolean;
+  maxAge?: number;
+  accountRateLimit?: OpaqueOptions["accountRateLimit"];
+  advanced?: BetterAuthOptions["advanced"];
+  /** Also enables Better Auth's own email/password sign-in. */
+  classic?: boolean;
+}) {
   const db = { ...createMemoryDb(), twoFactor: [] };
   const app = createPayloadApp();
   const opaquePlugin = opaque({
@@ -32,10 +40,19 @@ async function fixture(input?: { missingHook?: boolean; opaqueFirst?: boolean; m
     keyStretching: CHEAP_STRETCHING,
     hooks: app.hooks,
     passwordReset: { url: (token) => `https://example.com/reset?token=${token}` },
+    accountRateLimit: input?.accountRateLimit,
   });
+  const otps: string[] = [];
+  // Runs before every session row is written; a test arms it to race a credential switch.
+  const sessionCreation: { before?: () => Promise<void> } = {};
   const twoFactorPlugin = twoFactor({
     allowPasswordless: true,
     twoFactorCookieMaxAge: input?.maxAge,
+    otpOptions: {
+      sendOTP: ({ otp }) => {
+        otps.push(otp);
+      },
+    },
   });
   if (input?.missingHook) twoFactorPlugin.hooks.after = [];
   const plugins = input?.opaqueFirst
@@ -48,6 +65,17 @@ async function fixture(input?: { missingHook?: boolean; opaqueFirst?: boolean; m
     rateLimit: { enabled: false },
     logger: { disabled: true },
     plugins,
+    advanced: input?.advanced,
+    emailAndPassword: { enabled: input?.classic ?? false },
+    databaseHooks: {
+      session: {
+        create: {
+          before: async () => {
+            await sessionCreation.before?.();
+          },
+        },
+      },
+    },
   });
   const browser = createTestClient(auth);
   const signUp = await browser.authClient.signUp.opaque({
@@ -57,7 +85,7 @@ async function fixture(input?: { missingHook?: boolean; opaqueFirst?: boolean; m
     payload: PAYLOAD,
   });
   expect(signUp.error).toBeNull();
-  return { db, app, auth, browser, exportKey: signUp.data!.exportKey };
+  return { db, app, auth, browser, otps, sessionCreation, exportKey: signUp.data!.exportKey };
 }
 
 async function passwordProof(browser: TestClient, password = PASSWORD): Promise<string> {
@@ -203,6 +231,23 @@ for (const opaqueFirst of [false, true]) {
     expect(
       new Date(row.expiresAt as Date).getTime() - new Date(row.createdAt as Date).getTime(),
     ).toBeLessThanOrEqual(120_000);
+    const bindingPrefix = "opaque:two-factor-pending:";
+    const binding = db.verification.find((value) =>
+      String(value.identifier).startsWith(bindingPrefix),
+    )!;
+    // The native challenge row is `2fa-<random>`; its random part may itself contain "-".
+    const challenge = db.verification.find((value) => {
+      const identifier = String(value.identifier);
+      return (
+        identifier.startsWith("2fa-") &&
+        !identifier.startsWith("2fa-attempts-") &&
+        !identifier.startsWith("2fa-otp-")
+      );
+    })!;
+    expect(binding.identifier).not.toContain(String(challenge.identifier));
+    expect(new Date(binding.expiresAt as Date).getTime()).toBeLessThanOrEqual(
+      new Date(challenge.expiresAt as Date).getTime() + 1000,
+    );
     const unauthenticated = await browser.authClient.opaque.loadSignInPayload({
       payloadToken: pending.payloadToken,
     });
@@ -211,6 +256,9 @@ for (const opaqueFirst of [false, true]) {
       (await browser.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
     ).toBeNull();
     expect((await browser.authClient.getSession()).data?.user.email).toBe(EMAIL);
+    expect(
+      db.verification.some((value) => String(value.identifier).startsWith(bindingPrefix)),
+    ).toBe(false);
     expect(
       (await browser.authClient.opaque.loadSignInPayload({ payloadToken: pending.payloadToken }))
         .data?.payload,
@@ -282,26 +330,213 @@ test("payload tokens reject another user's session, an older session, and expiry
   ).toBe("INVALID_STATE");
 });
 
-test("reset after the first factor invalidates the credential-bound payload token", async () => {
+type Factor = "totp" | "otp" | "backup-code";
+type Replacement = "reset" | "change-password";
+
+async function enableAllFactors(owner: TestClient) {
+  const uri = await enableTotp(owner);
+  const generated = await owner.authClient.twoFactor.generateBackupCodes({
+    password: await passwordProof(owner),
+  });
+  expect(generated.error).toBeNull();
+  return { uri, backupCode: generated.data!.backupCodes[0]! };
+}
+
+async function verifySecondFactor(
+  browser: TestClient,
+  factor: Factor,
+  secrets: { uri: string; backupCode: string; otps: string[] },
+) {
+  if (factor === "totp") {
+    return browser.authClient.twoFactor.verifyTotp({ code: await totpCode(secrets.uri) });
+  }
+  if (factor === "backup-code") {
+    return browser.authClient.twoFactor.verifyBackupCode({ code: secrets.backupCode });
+  }
+  const sent = await browser.authClient.twoFactor.sendOtp({});
+  if (sent.error) return sent;
+  return browser.authClient.twoFactor.verifyOtp({ code: secrets.otps.at(-1) ?? "000000" });
+}
+
+async function replacePassword(
+  replacement: Replacement,
+  auth: Awaited<ReturnType<typeof fixture>>["auth"],
+  owner: TestClient,
+) {
+  let error: unknown;
+  if (replacement === "change-password") {
+    ({ error } = await owner.authClient.opaque.changePassword({
+      currentPassword: PASSWORD,
+      newPassword: "replacement-password",
+    }));
+  } else {
+    const { url } = await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
+    ({ error } = await createTestClient(auth).authClient.opaque.resetPassword({
+      token: new URL(url).searchParams.get("token")!,
+      newPassword: "replacement-password",
+      payload: { ciphertext: "replacement" },
+    }));
+  }
+  expect(error).toBeNull();
+}
+
+for (const replacement of ["reset", "change-password"] as const) {
+  for (const factor of ["totp", "otp", "backup-code"] as const) {
+    test(`a pending sign-in proven before a ${replacement} cannot finish with ${factor}`, async () => {
+      const { browser: owner, auth, db, otps } = await fixture();
+      const secrets = { ...(await enableAllFactors(owner)), otps };
+      const attacker = createTestClient(auth);
+      await pendingSignIn(attacker);
+      await replacePassword(replacement, auth, owner);
+      const sessions = db.session.length;
+      const sentOtps = otps.length;
+      const challengeCookies = new Map(attacker.cookies);
+
+      // For OTP the refusal already comes from sending: a stale challenge triggers no delivery.
+      const refused = await verifySecondFactor(attacker, factor, secrets);
+      expect(refused.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+      expect(otps).toHaveLength(sentOtps);
+      expect(db.session).toHaveLength(sessions);
+      expect((await attacker.authClient.getSession()).data).toBeNull();
+
+      // The challenge is retired: replaying its cookie cannot finish it either.
+      for (const [name, value] of challengeCookies) attacker.cookies.set(name, value);
+      const replayed = await verifySecondFactor(attacker, factor, secrets);
+      expect(replayed.error?.code).toBe("INVALID_TWO_FACTOR_COOKIE");
+      expect(db.session).toHaveLength(sessions);
+
+      // The refusal spent no factor: the new password still signs in with the same one.
+      const browser = createTestClient(auth);
+      await pendingSignIn(browser, "replacement-password");
+      expect((await verifySecondFactor(browser, factor, secrets)).error).toBeNull();
+      expect((await browser.authClient.getSession()).data?.user.email).toBe(EMAIL);
+    });
+  }
+}
+
+for (const opaqueFirst of [false, true]) {
+  test(`a credential switch during second-factor verification leaves no session or trusted device (opaque first: ${opaqueFirst})`, async () => {
+    const { browser: owner, auth, db, sessionCreation } = await fixture({ opaqueFirst });
+    const uri = await enableTotp(owner);
+    await owner.authClient.signOut();
+    const attacker = createTestClient(auth);
+    await pendingSignIn(attacker);
+    // Switch after the verify passed its credential check, before its session is written.
+    sessionCreation.before = async () => {
+      sessionCreation.before = undefined;
+      await replacePassword("reset", auth, owner);
+    };
+    const verified = await attacker.authClient.twoFactor.verifyTotp({
+      code: await totpCode(uri),
+      trustDevice: true,
+    });
+    expect(sessionCreation.before).toBeUndefined();
+    expect(verified.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+    expect(db.session).toHaveLength(0);
+    expect((await attacker.authClient.getSession()).data).toBeNull();
+    expect(db.verification.some((row) => String(row.identifier).startsWith("trust-device-"))).toBe(
+      false,
+    );
+    // Even with the new password, this device was never trusted.
+    await pendingSignIn(attacker, "replacement-password");
+  });
+}
+
+for (const advanced of [
+  { cookiePrefix: "custom-app" },
+  { cookiePrefix: "custom-app", useSecureCookies: true },
+]) {
+  test(`the challenge binding follows the configured cookie names (${JSON.stringify(advanced)})`, async () => {
+    const { browser: owner, auth } = await fixture({ advanced });
+    const uri = await enableTotp(owner);
+    await owner.authClient.signOut();
+    const prefix = advanced.useSecureCookies ? "__Secure-custom-app." : "custom-app.";
+
+    const browser = createTestClient(auth);
+    await pendingSignIn(browser);
+    expect(browser.cookies.has(`${prefix}two_factor`)).toBe(true);
+    expect(
+      (await browser.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
+    ).toBeNull();
+    expect((await browser.authClient.getSession()).data?.user.email).toBe(EMAIL);
+
+    const attacker = createTestClient(auth);
+    await pendingSignIn(attacker);
+    await replacePassword("reset", auth, owner);
+    const refused = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+    expect(refused.error?.code).toBe("CREDENTIAL_CHANGED");
+    expect((await attacker.authClient.getSession()).data).toBeNull();
+  });
+}
+
+test("a classic-password 2FA sign-in cannot finish once an OPAQUE credential was attached", async () => {
+  const { auth, db } = await fixture({ classic: true });
+  const email = "classic@example.com";
+  const password = "classic-password";
+  const owner = createTestClient(auth);
+  expect(
+    (await owner.authClient.signUp.email({ email, password, name: "Classic" })).error,
+  ).toBeNull();
+  const enabled = await owner.authClient.twoFactor.enable({ password });
+  if (enabled.data?.method !== "totp") throw new Error("Expected TOTP setup");
+  const uri = enabled.data.totpURI!;
+  expect(
+    (await owner.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
+  ).toBeNull();
+
+  const startNative = async (browser: TestClient) => {
+    const started = await browser.authClient.signIn.email({ email, password });
+    expect(started.data).toMatchObject({ twoFactorRedirect: true });
+  };
+  // Untouched: a native challenge without an OPAQUE credential behind it still completes.
+  const control = createTestClient(auth);
+  await startNative(control);
+  expect(
+    (await control.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
+  ).toBeNull();
+  expect((await control.authClient.getSession()).data?.user.email).toBe(email);
+
+  const attacker = createTestClient(auth);
+  await startNative(attacker);
+  const attached = await owner.authClient.opaque.attachCredential({
+    currentPassword: password,
+    newPassword: "attached-password",
+  });
+  expect(attached.error).toBeNull();
+  const sessions = db.session.length;
+  const challengeCookies = new Map(attacker.cookies);
+  const refused = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+  expect(refused.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
+  expect(db.session).toHaveLength(sessions);
+  expect((await attacker.authClient.getSession()).data).toBeNull();
+  for (const [name, value] of challengeCookies) attacker.cookies.set(name, value);
+  const replayed = await attacker.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+  expect(replayed.error?.code).toBe("INVALID_TWO_FACTOR_COOKIE");
+});
+
+test("the password proof challenge consults the account rate limit", async () => {
+  const flows: string[] = [];
+  const { browser } = await fixture({
+    accountRateLimit: ({ flow }) => {
+      flows.push(flow);
+      return false;
+    },
+  });
+  const refused = await browser.authClient.opaque.createPasswordProof({ password: PASSWORD });
+  expect(refused.error).toMatchObject({ status: 429, code: "TOO_MANY_ATTEMPTS" });
+  expect(flows).toEqual(["password-proof"]);
+});
+
+test("a password change after the second factor invalidates the credential-bound payload token", async () => {
   const { browser: owner, auth } = await fixture();
   const uri = await enableTotp(owner);
   await owner.authClient.signOut();
   const browser = createTestClient(auth);
   const pending = await pendingSignIn(browser);
-  const reset = await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
-  const token = new URL(reset.url).searchParams.get("token")!;
-  expect(
-    (
-      await createTestClient(auth).authClient.opaque.resetPassword({
-        token,
-        newPassword: "reset-password",
-        payload: { ciphertext: "replacement" },
-      })
-    ).error,
-  ).toBeNull();
   expect(
     (await browser.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
   ).toBeNull();
+  await replacePassword("change-password", auth, browser);
   expect(
     (await browser.authClient.opaque.loadSignInPayload({ payloadToken: pending.payloadToken }))
       .error?.code,
@@ -435,11 +670,14 @@ test("password proof challenge state cannot cross sessions or survive a credenti
       })
     ).error,
   ).toBeNull();
+  // Changing the password revoked every session and issued the caller a new one.
+  const renewedCookie = [...browser.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
+  expect(renewedCookie).not.toBe(cookie);
   const staleComplete = await postJson(
     auth,
     OPAQUE_PATHS.passwordProofComplete,
     { stateId: staleChallenge.body!.stateId, loginFinalization: staleFinished.finishLoginRequest },
-    { cookie },
+    { cookie: renewedCookie },
   );
   expect(staleComplete.body?.code).toBe("INVALID_PASSWORD");
 });

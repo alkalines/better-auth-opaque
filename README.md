@@ -4,7 +4,7 @@
 
 With OPAQUE the password never reaches your server, and the server stores a registration record instead of a password hash. Each successful login also yields an **export key** on the client: a stable secret per credential that apps can use to encrypt client-side data. This package adds sign-up, sign-in, password change and password reset endpoints to Better Auth, a client plugin that runs the protocol in the browser, and hooks for keeping app data that is encrypted under the export key consistent with the credential.
 
-> Status: 0.1.0, unreleased.
+> Status: 0.2.0. Before 1.0, minor versions may contain breaking changes; see the [changelog](CHANGELOG.md).
 
 ## Install
 
@@ -51,13 +51,19 @@ Run your Better Auth schema generation/migration afterwards: the plugin adds `re
 
 Options (see the TSDoc on [`OpaqueOptions`](src/server/runtime.ts)):
 
-| Option             | Default             | Notes                                                                                                                            |
-| ------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `serverSetup`      | required            | Output of `create-setup`.                                                                                                        |
-| `keyStretching`    | `"rfc-recommended"` | Serenity key-stretching profile for new registrations. Stored per account, so changing it later keeps existing accounts working. |
-| `serverIdentifier` | unset               | Bound into every record. Changing it later breaks **all** existing records.                                                      |
-| `hooks`            | none                | App payload hooks, below.                                                                                                        |
-| `passwordReset`    | none                | `{ url(token), expiresIn = 3600 }` for `createPasswordResetToken`.                                                               |
+| Option                    | Default                                                  | Notes                                                                                                                                                           |
+| ------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `serverSetup`             | required                                                 | Output of `create-setup`.                                                                                                                                       |
+| `keyStretching`           | `"rfc-recommended"`                                      | Serenity key-stretching profile for new registrations. Stored per account, so changing it later keeps existing accounts working. Clients must allow it (below). |
+| `serverIdentifier`        | unset                                                    | Bound into every record. Changing it later breaks **all** existing records.                                                                                     |
+| `hooks`                   | none                                                     | App payload hooks and `onCredentialChanged`, below.                                                                                                             |
+| `passwordReset`           | none                                                     | `{ url(token), expiresIn = 3600 }` (seconds, at most 7 days) for `createPasswordResetToken`.                                                                    |
+| `disableSignUp`           | `emailAndPassword.disableSignUp`                         | Rejects OPAQUE sign-up with `SIGN_UP_DISABLED`.                                                                                                                 |
+| `accountRateLimit`        | none                                                     | `({ key, flow }, ctx) => boolean`: per-account throttle, below.                                                                                                 |
+| `attach`                  | `{ requireCurrentPassword: true, freshSessionAge: 600 }` | Migration from classic passwords, below.                                                                                                                        |
+| `removeClassicCredential` | `true`                                                   | Delete the classic `credential` account once an OPAQUE credential was attached or enrolled through reset.                                                       |
+
+Invalid options throw at construction.
 
 ### Password reset
 
@@ -69,6 +75,20 @@ await sendEmail(email, url);
 ```
 
 It throws `USER_NOT_FOUND` when the email has no OPAQUE account; do not forward that difference to the requester if you want reset requests to be enumeration-safe.
+
+A link is bound to the credential it was issued for: once any reset or password change completes, every other outstanding link stops working. Issuing a new link does not invalidate earlier ones unless you pass `revokePrevious: true`; `auth.api.revokePasswordResetTokens({ body: { email } })` (server-only) invalidates all of a user's links without issuing one.
+
+### Per-account rate limit
+
+Better Auth's rate limiter counts per client IP, which does not stop guessing from many IPs and depends on the IP your deployment can resolve. `accountRateLimit` is called before every sign-in, password-proof, change-password and attach challenge:
+
+```ts
+opaque({
+  serverSetup,
+  // `key` is an HMAC of the lowercased email (also for unknown emails); return false to answer 429 TOO_MANY_ATTEMPTS.
+  accountRateLimit: async ({ key, flow }) => limiter.consume(`${flow}:${key}`),
+});
+```
 
 ### Limitations
 
@@ -115,6 +135,7 @@ if (data?.twoFactorRedirect) {
 - `twoFactor({ allowPasswordless: true })` is required: OPAQUE users have no credential password, so without it they cannot enable 2FA (the plugin logs a warning at startup). The opaque plugin then requires a valid password proof (`opaque.createPasswordProof`: single use, 5 minutes, bound to the user and the current credential) for `/two-factor/enable`, `/disable`, `/get-totp-uri` and `/generate-backup-codes`. Users who also have an email/password credential keep Better Auth's password check.
 - A 2FA sign-in returns `{ twoFactorRedirect, twoFactorMethods, payloadToken, exportKey }` and no session or payload. Keep `exportKey` and `payloadToken` in memory and handle the redirect in your sign-in UI; `twoFactorClient({ twoFactorPage })` reloads the page and loses them. `loadSignInPayload` needs the session created by the second-factor verification, is single use and expires with the two-factor cookie (`twoFactorCookieMaxAge`, 10 minutes by default).
 - The export key is returned before the second factor because anyone holding the password can derive it locally from the challenge; what 2FA protects is the session and the payload.
+- A pending second factor is bound to the credential that proved the password: if a reset or password change replaces it first, verifying the second factor fails with `CREDENTIAL_CHANGED` and no session is created.
 - The integration calls the installed two-factor plugin's sign-in hook, an internal of Better Auth; it is tested with better-auth 1.7.18. If the hook cannot be found, 2FA users fail closed with `TWO_FACTOR_NOT_SUPPORTED` instead of signing in without their second factor.
 
 ### Payload hooks
@@ -139,13 +160,29 @@ opaque({
     },
     loadPayload: async ({ userId, credentialVersion }) =>
       (await db.payloads.find({ userId, credentialVersion }))?.payload ?? null,
+    // Audit log, notify other devices; runs after sessions were revoked.
+    onCredentialChanged: async ({
+      userId,
+      flow,
+      previousCredentialVersion,
+      credentialVersion,
+    }) => {},
   },
 });
 ```
 
-Order for every registration (sign-up, password change, reset): `validatePayload` → `commitPayload` → account record switched to the new version (an atomic compare-and-set on the previous version) → `activatePayload`. `loadPayload` receives the version the account currently points to. A failure at any step leaves the user able to sign in with either the old or the new password and receive the matching payload.
+Order for every registration (sign-up, password change, reset, attach): `validatePayload` → `commitPayload` → account record switched to the new version (an atomic compare-and-set on the previous version, or the new account row for sign-up and attach) → `activatePayload`. `loadPayload` receives the version the account currently points to (`null` only when verifying an enrolment reset link of a user without an OPAQUE credential). A failure at any step leaves the user able to sign in with either the old or the new password and receive the matching payload.
 
 `activatePayload` must delete only `previousCredentialVersion`. Deleting every other version is unsafe: a slow activation of an earlier switch, or a commit for a registration still in flight, would lose the payload of the credential that is (or is about to become) current. Payloads committed by registrations that later failed are left behind; if storage matters, periodically delete versions the account does not point to that are older than an hour (commit and switch happen within one request). The hook contracts are documented on [`OpaqueHooks`](src/contract.ts).
+
+### Migrating classic passwords
+
+Users who sign in with a Better Auth email/password (`credential` account) can move to OPAQUE in two ways:
+
+- **Attach** while signed in: `authClient.opaque.attachCredential({ currentPassword, newPassword, payload })` proves the classic password to the server (which already stores its hash), registers the new password with OPAQUE, revokes every session and returns a new one (`data.token`, `data.exportKey`). Pick a **new** password: the server knows the classic one, so the client refuses `newPassword === currentPassword` with `PASSWORD_REUSED`. With `attach: { requireCurrentPassword: false }`, a session younger than `freshSessionAge` seconds may attach without `currentPassword`; a stolen fresh session can then set the password, so use it only right after sign-in.
+- **Enrolment reset**: `auth.api.createPasswordResetToken({ body: { email, allowEnrolment: true } })` also issues links for users without an OPAQUE credential; `resetPassword` with such a link creates their first OPAQUE credential and revokes all sessions. `verifyResetToken` returns `loadPayload` output for `credentialVersion: null`.
+
+Both delete the classic `credential` account afterwards unless `removeClassicCredential: false`. If that step fails after the OPAQUE credential was created, finish it with the server-only `auth.api.removeClassicCredential({ body: { userId } })`. A user who already has an OPAQUE credential gets `OPAQUE_ACCOUNT_EXISTS` from attach; use `changePassword`.
 
 ## Client
 
@@ -165,6 +202,7 @@ await authClient.signUp.opaque({
 const { data, error } = await authClient.signIn.opaque({ email, password });
 // data.exportKey (base64url), data.payload (loadPayload output)
 
+// Revokes every session of the user and returns a new one for this browser: data.token.
 await authClient.opaque.changePassword({ currentPassword, newPassword, payload: rewrap });
 await authClient.opaque.verifyResetToken({ token }); // { payload }
 await authClient.opaque.resetPassword({ token, newPassword, payload: freshPayload });
@@ -172,7 +210,22 @@ await authClient.opaque.resetPassword({ token, newPassword, payload: freshPayloa
 
 All actions return Better Auth's `{ data, error }` and accept `fetchOptions`. `exportKey` is returned only after the server's finish step succeeded; payload builders receive the new export key locally and only their result is sent. Error codes are exported as `OPAQUE_ERROR_CODES` and exposed through the client's `$ERROR_CODES`.
 
-`opaqueClient({ keyStretching })` optionally pins the profile the client accepts for new registrations; a server advertising a different profile is rejected with `KEY_STRETCHING_MISMATCH`.
+### Key-stretching policy
+
+The client only derives keys with profiles it allows, so a compromised or misconfigured server cannot make it register under weak Argon2id parameters or run unbounded work at login:
+
+```ts
+opaqueClient({
+  keyStretching: {
+    // Profiles new credentials may use (sign-up, change, reset, attach).
+    registration: ["rfc-recommended"],
+    // Profiles logins may use; defaults to DEFAULT_ALLOWED_KEY_STRETCHING plus `registration`.
+    login: ["rfc-recommended", "memory-constrained"],
+  },
+});
+```
+
+Both lists default to `DEFAULT_ALLOWED_KEY_STRETCHING` (serenity's named profiles, all at least `memory-constrained`). A challenge advertising any other profile fails with `KEY_STRETCHING_MISMATCH` before anything is derived or sent; a malformed challenge fails with `INVALID_SERVER_RESPONSE`. If your server uses a custom profile, or accounts still carry an older one, list it explicitly. Custom profiles must stay within `ARGON2ID_CUSTOM_LIMITS` (exported by the server entry) on both sides. `rfc-recommended` takes seconds and up to 2 GiB per derivation; test it on your slowest target devices.
 
 ## Convex
 

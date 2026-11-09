@@ -52,6 +52,8 @@ export const createAuthOptions = (
             await runMutation(internal.payloads.activate, { userId, previousCredentialVersion });
           },
           loadPayload: async ({ userId, credentialVersion }) => {
+            // `null` only for enrolment reset links, which these tests do not issue.
+            if (credentialVersion === null) return null;
             const { runQuery } = requireActionCtx(ctx);
             return await runQuery(internal.payloads.load, { userId, credentialVersion });
           },

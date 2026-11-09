@@ -38,10 +38,21 @@ export type OpaqueStates = {
     serverLoginState: string;
     keyStretching: OpaqueKeyStretching;
   };
+  /** `credentialVersion: null` marks an enrolment: the user had no OPAQUE credential yet. */
   "reset-password": {
     userId: string;
     credentialId: string;
-    credentialVersion: string;
+    credentialVersion: string | null;
+    keyStretching: OpaqueKeyStretching;
+  };
+  /**
+   * Bound to the user, the freshly minted credential id, and a fingerprint of the classic
+   * account the caller proved (see `classicAccountFingerprint`).
+   */
+  attach: {
+    userId: string;
+    credentialId: string;
+    classicFingerprint: string;
     keyStretching: OpaqueKeyStretching;
   };
 };

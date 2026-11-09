@@ -51,6 +51,8 @@ export const auth = betterAuth({
           });
         },
         loadPayload: async ({ userId, credentialVersion }) => {
+          // `null` only for enrolment reset links, which this example does not issue.
+          if (credentialVersion === null) return null;
           const row = await prisma.demoPayload.findUnique({
             where: { userId_credentialVersion: { userId, credentialVersion } },
           });

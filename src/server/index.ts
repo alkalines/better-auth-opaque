@@ -6,6 +6,7 @@ import {
   OPAQUE_PATHS,
   OPAQUE_PLUGIN_ID,
 } from "../contract.ts";
+import { attachEndpoints } from "./attach.ts";
 import { changePasswordEndpoints } from "./change-password.ts";
 import { resetPasswordEndpoints } from "./reset-password.ts";
 import { createRuntime, type OpaqueOptions } from "./runtime.ts";
@@ -13,7 +14,7 @@ import { signInEndpoints } from "./sign-in.ts";
 import { signUpEndpoints } from "./sign-up.ts";
 import { twoFactorIntegration } from "./two-factor.ts";
 
-export type { OpaqueOptions } from "./runtime.ts";
+export type { OpaqueOptions, OpaqueRateLimitedFlow } from "./runtime.ts";
 
 const signInAndResetPaths: string[] = [
   OPAQUE_PATHS.signInChallenge,
@@ -24,12 +25,14 @@ const signInAndResetPaths: string[] = [
   OPAQUE_PATHS.resetVerify,
   OPAQUE_PATHS.resetChallenge,
   OPAQUE_PATHS.resetComplete,
+  OPAQUE_PATHS.attachChallenge,
 ];
 const registrationPaths: string[] = [
   OPAQUE_PATHS.signUpChallenge,
   OPAQUE_PATHS.signUpComplete,
   OPAQUE_PATHS.changePasswordChallenge,
   OPAQUE_PATHS.changePasswordComplete,
+  OPAQUE_PATHS.attachComplete,
 ];
 
 /**
@@ -48,6 +51,10 @@ const registrationPaths: string[] = [
  *
  * HTTP endpoints are `scope: "server"`, so the Better Auth client does not infer path actions for
  * them; use the `opaqueClient` plugin, whose actions run both protocol round trips.
+ *
+ * Classic email/password users migrate with `/opaque/attach/*` or a reset link issued with
+ * `createPasswordResetToken({ allowEnrolment: true })`; `removeClassicCredential` finishes a
+ * migration that kept the classic password.
  */
 export function opaque(options: OpaqueOptions) {
   const runtime = createRuntime(options);
@@ -80,6 +87,7 @@ export function opaque(options: OpaqueOptions) {
       ...signUpEndpoints(runtime),
       ...signInEndpoints(runtime),
       ...changePasswordEndpoints(runtime),
+      ...attachEndpoints(runtime),
       ...resetPasswordEndpoints(runtime),
       ...twoFactor.endpoints,
       validateOpaqueSetup,

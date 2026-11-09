@@ -37,6 +37,8 @@ export const OPAQUE_PATHS = {
   resetVerify: "/reset/opaque/verify",
   resetChallenge: "/reset/opaque/challenge",
   resetComplete: "/reset/opaque/complete",
+  attachChallenge: "/opaque/attach/challenge",
+  attachComplete: "/opaque/attach/complete",
 } as const;
 
 /**
@@ -59,6 +61,14 @@ export const OPAQUE_ERROR_CODES = {
   INVALID_CREDENTIALS: {
     code: "INVALID_CREDENTIALS",
     message: "Invalid email or password",
+  },
+  /**
+   * OPAQUE sign-up is disabled by `opaque({ disableSignUp })` or, when that option is unset, by
+   * Better Auth's `emailAndPassword.disableSignUp`.
+   */
+  SIGN_UP_DISABLED: {
+    code: "SIGN_UP_DISABLED",
+    message: "Sign up is disabled",
   },
   /** A current-password proof failed, including a missing, expired, used, or stale management proof. */
   INVALID_PASSWORD: {
@@ -83,7 +93,11 @@ export const OPAQUE_ERROR_CODES = {
     code: "INVALID_RESET_TOKEN",
     message: "Password reset token is invalid or expired",
   },
-  /** `createPasswordResetToken` found no user with an OPAQUE account for the email. */
+  /**
+   * A server-only reset API found no matching user: `createPasswordResetToken` without
+   * `allowEnrolment` needs a user with an OPAQUE account, with it any existing user;
+   * `revokePasswordResetTokens` needs an existing user.
+   */
   USER_NOT_FOUND: {
     code: "USER_NOT_FOUND",
     message: "User not found",
@@ -93,7 +107,10 @@ export const OPAQUE_ERROR_CODES = {
     code: "OPAQUE_ACCOUNT_NOT_FOUND",
     message: "No OPAQUE account for this user",
   },
-  /** The credential changed between the challenge and the complete call; start over. */
+  /**
+   * The credential changed between the challenge and the complete call, or a second-factor
+   * sign-in started with a password that has since been replaced; start over.
+   */
   CREDENTIAL_CHANGED: {
     code: "CREDENTIAL_CHANGED",
     message: "Credential changed during the operation",
@@ -118,12 +135,43 @@ export const OPAQUE_ERROR_CODES = {
     message: "Invalid payload",
   },
   /**
-   * Client-side only: the server advertised a registration key-stretching profile that differs
-   * from the one pinned in `opaqueClient({ keyStretching })`. Nothing was sent to `complete`.
+   * Client-side only: the server advertised a key-stretching profile that the client's policy
+   * (`opaqueClient({ keyStretching })`) does not allow, for a registration or a login. Nothing was
+   * derived and nothing was sent to `complete`.
    */
   KEY_STRETCHING_MISMATCH: {
     code: "KEY_STRETCHING_MISMATCH",
-    message: "Server key stretching profile does not match the client configuration",
+    message: "Server key stretching profile is not allowed by the client configuration",
+  },
+  /**
+   * Client-side only: a challenge response did not match the contract schema, or serenity could
+   * not process it. Nothing was sent to `complete`.
+   */
+  INVALID_SERVER_RESPONSE: {
+    code: "INVALID_SERVER_RESPONSE",
+    message: "Invalid response from the authentication server",
+  },
+  /**
+   * Attach: the signed-in user already has an OPAQUE credential (also returned when a concurrent
+   * attach or enrolment won the race). Use change-password instead.
+   */
+  OPAQUE_ACCOUNT_EXISTS: {
+    code: "OPAQUE_ACCOUNT_EXISTS",
+    message: "This user already has an OPAQUE account",
+  },
+  /**
+   * Client-side only: `attachCredential` was called with a new password equal to the classic
+   * password. The server knows the classic password, so reusing it would let the server derive
+   * the export key. Nothing was sent.
+   */
+  PASSWORD_REUSED: {
+    code: "PASSWORD_REUSED",
+    message: "The new password must differ from the current password",
+  },
+  /** The app's `accountRateLimit` hook refused another attempt for this account (HTTP 429). */
+  TOO_MANY_ATTEMPTS: {
+    code: "TOO_MANY_ATTEMPTS",
+    message: "Too many attempts, try again later",
   },
 } as const satisfies Record<string, RawError>;
 
@@ -146,19 +194,36 @@ export const OPAQUE_ACCOUNT_FIELDS = {
 } as const;
 
 /**
+ * Bounds of a custom Argon2id profile. The maxima keep a profile within what serenity's wasm32
+ * build can run (memory just below the 2 GiB of `"rfc-recommended"`, the largest profile serenity
+ * ships, beyond which it reports browser crashes) and cap the work a server can ask of a client.
+ * Memory is in KiB; RFC 9106 requires at least 8 KiB per lane.
+ */
+export const ARGON2ID_CUSTOM_LIMITS = {
+  maxIterations: 64,
+  maxMemory: 2 ** 21 - 1,
+  maxParallelism: 64,
+} as const;
+
+/**
  * Serenity key-stretching profile applied by the client to the OPRF output (Argon2id).
- * Named profiles are serenity's; the custom form takes Argon2id parameters directly.
+ * Named profiles are serenity's; the custom form takes Argon2id parameters directly, within
+ * {@link ARGON2ID_CUSTOM_LIMITS}, so a profile that passes this schema never makes serenity throw.
  */
 export const keyStretchingSchema = z.union([
   z.literal("rfc-recommended"),
   z.literal("rfc-draft-recommended"),
   z.literal("memory-constrained"),
   z.strictObject({
-    "argon2id-custom": z.strictObject({
-      iterations: z.int().min(1),
-      memory: z.int().min(1),
-      parallelism: z.int().min(1),
-    }),
+    "argon2id-custom": z
+      .strictObject({
+        iterations: z.int().min(1).max(ARGON2ID_CUSTOM_LIMITS.maxIterations),
+        memory: z.int().min(8).max(ARGON2ID_CUSTOM_LIMITS.maxMemory),
+        parallelism: z.int().min(1).max(ARGON2ID_CUSTOM_LIMITS.maxParallelism),
+      })
+      .refine((params) => params.memory >= 8 * params.parallelism, {
+        message: "memory must be at least 8 KiB per lane",
+      }),
   }),
 ]);
 
@@ -194,8 +259,8 @@ const payloadSchema = z.unknown();
  * serenity as `identifiers.server` or the protocol fails.
  */
 const registrationChallengeFields = {
-  stateId: z.string(),
-  registrationResponse: z.string(),
+  stateId: stateIdSchema,
+  registrationResponse: opaqueMessageSchema,
   keyStretching: keyStretchingSchema,
   serverIdentifier: z.string().optional(),
 };
@@ -239,8 +304,8 @@ export const signInChallengeBodySchema = z.object({
  * only references it.
  */
 export const signInChallengeResponseSchema = z.object({
-  stateId: z.string(),
-  loginResponse: z.string(),
+  stateId: stateIdSchema,
+  loginResponse: opaqueMessageSchema,
   keyStretching: keyStretchingSchema,
   serverIdentifier: z.string().optional(),
 });
@@ -284,7 +349,7 @@ export const changePasswordChallengeBodySchema = z.object({
  */
 export const changePasswordChallengeResponseSchema = z.object({
   ...registrationChallengeFields,
-  loginResponse: z.string(),
+  loginResponse: opaqueMessageSchema,
   loginKeyStretching: keyStretchingSchema,
 });
 
@@ -319,9 +384,51 @@ export const resetCompleteBodySchema = z.object({
   payload: payloadSchema.optional(),
 });
 
-/** Body of the server-only `auth.api.createPasswordResetToken`. */
+/**
+ * Body of the server-only `auth.api.createPasswordResetToken`. `revokePrevious` invalidates every
+ * reset link issued earlier for the same user before minting the new one. `allowEnrolment` also
+ * issues a link for an existing user without an OPAQUE credential (e.g. a classic email/password
+ * user); completing it creates the user's first OPAQUE credential.
+ */
 export const createPasswordResetTokenBodySchema = z.object({
   email: z.email(),
+  revokePrevious: z.boolean().optional(),
+  allowEnrolment: z.boolean().optional(),
+});
+
+/** Body of the server-only `auth.api.revokePasswordResetTokens`. */
+export const revokePasswordResetTokensBodySchema = z.object({
+  email: z.email(),
+});
+
+// Attach (requires a session of a user with a classic Better Auth password)
+
+/**
+ * `POST /opaque/attach/challenge`: starts the registration of a first OPAQUE credential for the
+ * signed-in user. `currentPassword` is the user's classic Better Auth password (which the server
+ * already stores a hash of); it is required unless the server allows fresh sessions instead.
+ */
+export const attachChallengeBodySchema = z.object({
+  registrationRequest: opaqueMessageSchema,
+  currentPassword: z.string().min(1).max(1024).optional(),
+});
+
+/** Response of `/opaque/attach/challenge`. */
+export const attachChallengeResponseSchema = z.object(registrationChallengeFields);
+
+/** `POST /opaque/attach/complete`. */
+export const attachCompleteBodySchema = z.object({
+  stateId: stateIdSchema,
+  registrationRecord: opaqueMessageSchema,
+  payload: payloadSchema.optional(),
+});
+
+/**
+ * Body of the server-only `auth.api.removeClassicCredential`: deletes the user's classic
+ * `credential` account once an OPAQUE credential exists, e.g. to finish an interrupted migration.
+ */
+export const removeClassicCredentialBodySchema = z.object({
+  userId: z.string().min(1),
 });
 
 // Responses carrying app payloads
@@ -368,9 +475,19 @@ export type ResetVerifyResponse = {
   payload: unknown;
 };
 
-/** Response of `/opaque/change-password/complete` and `/reset/opaque/complete`. */
+/** Response of `/reset/opaque/complete` and the server-only `revokePasswordResetTokens`. */
 export type CredentialUpdateResponse = {
   status: true;
+};
+
+/**
+ * Response of `/opaque/change-password/complete` and `/opaque/attach/complete`. Every session of
+ * the user is revoked and the caller gets a new one: `token` is its session token (also set as
+ * the session cookie).
+ */
+export type ChangePasswordResponse = {
+  status: true;
+  token: string;
 };
 
 /** Response of the server-only `auth.api.createPasswordResetToken`. */
@@ -383,12 +500,16 @@ export type CreatePasswordResetTokenResponse = {
 
 /**
  * Flow that triggered a hook. Reset verification and reset completion both use
- * `"reset-password"`.
+ * `"reset-password"`. `"attach"` adds a first OPAQUE credential to a user who signs in with a
+ * classic Better Auth password (`/opaque/attach/*`).
  */
-export type OpaqueFlow = "sign-up" | "sign-in" | "change-password" | "reset-password";
+export type OpaqueFlow = "sign-up" | "sign-in" | "change-password" | "reset-password" | "attach";
 
 /** Flows that create a new credential and may carry a payload. */
 export type OpaqueRegistrationFlow = Exclude<OpaqueFlow, "sign-in">;
+
+/** Flows that put a new credential on an existing user, reported by `onCredentialChanged`. */
+export type OpaqueCredentialChangeFlow = Exclude<OpaqueRegistrationFlow, "sign-up">;
 
 /** Endpoint context passed to every hook as the second argument. */
 export type OpaqueHookContext = GenericEndpointContext;
@@ -435,7 +556,8 @@ export type OpaqueHooks = {
   ) => Promise<void> | void;
   /**
    * Called after the account record points to `credentialVersion`. `previousCredentialVersion`
-   * is the version the record pointed to right before this switch (`null` on sign-up).
+   * is the version the record pointed to right before this switch (`null` on sign-up, on attach,
+   * and on a reset that enrols a user without an OPAQUE credential).
    *
    * Delete only the payload of `previousCredentialVersion`, never "every version except
    * `credentialVersion`": activation runs after the switch, so a delayed activation of an older
@@ -456,14 +578,32 @@ export type OpaqueHooks = {
   /**
    * Loads the payload returned by sign-in complete and reset verify. `credentialVersion` is the
    * version the account record points to, so the result matches the credential the client just
-   * used even if `activatePayload` never ran. The return value is sent to the client as-is.
+   * used even if `activatePayload` never ran. It is `null` only for reset verify of an enrolment
+   * link (`createPasswordResetToken({ allowEnrolment: true })` for a user without an OPAQUE
+   * credential), so apps can return recovery material that is not bound to a credential. The
+   * return value is sent to the client as-is.
    */
   loadPayload?: (
     input: {
       userId: string;
-      credentialVersion: string;
+      credentialVersion: string | null;
       flow: Extract<OpaqueFlow, "sign-in" | "reset-password">;
     },
     ctx: OpaqueHookContext,
   ) => Promise<unknown> | unknown;
+  /**
+   * Called once per credential change of an existing user (password change, reset, attach) after
+   * the account points at `credentialVersion` and the user's sessions were revoked, also when
+   * `activatePayload` failed. Use it for audit logs or notifying other devices. A throw is
+   * returned to the client but does not roll anything back.
+   */
+  onCredentialChanged?: (
+    input: {
+      userId: string;
+      flow: OpaqueCredentialChangeFlow;
+      previousCredentialVersion: string | null;
+      credentialVersion: string;
+    },
+    ctx: OpaqueHookContext,
+  ) => Promise<void> | void;
 };

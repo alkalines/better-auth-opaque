@@ -115,6 +115,7 @@ export type CapturedRequest = { url: string; body: string };
 /**
  * A real Better Auth client with the OPAQUE client plugin whose `fetch` calls `auth.handler`
  * directly. It keeps its own cookie jar (one browser) and records every request body.
+ * Omitting options allows the cheap fixture profile; `{}` exercises the real client defaults.
  */
 export function createTestClient(
   auth: { handler: (request: Request) => Promise<Response> },
@@ -156,7 +157,12 @@ export function createTestClient(
 
   const authClient = createAuthClient({
     baseURL: BASE_URL,
-    plugins: [opaqueClient(options), twoFactorClient()],
+    plugins: [
+      opaqueClient(
+        options === undefined ? { keyStretching: { registration: [CHEAP_STRETCHING] } } : options,
+      ),
+      twoFactorClient(),
+    ],
     fetchOptions: { customFetchImpl },
   });
 
