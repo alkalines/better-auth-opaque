@@ -14,21 +14,26 @@ import {
 import {
   assertPayloadSupported,
   attachCredential,
-  findCredentialByUserId,
-  readCredential,
+  readCredentialRow,
   replaceCredential,
-  type OpaqueCredential,
+  type OpaqueCredentialRow,
 } from "./credential.ts";
 import { randomToken, sha256 } from "./crypto.ts";
-import type { OpaqueRuntime } from "./runtime.ts";
+import { MAX_RESET_EXPIRES_IN_SECONDS, type OpaqueRuntime } from "./runtime.ts";
 import { consumeState, createState } from "./state.ts";
 
 /**
  * Row stored under a reset token's hash. The token is valid only while the account still points
- * at `credentialVersion` and the user's epoch row still holds `epoch`. `credentialVersion: null`
- * is an enrolment link for a user without an OPAQUE credential, valid only while none exists.
+ * at `credentialVersion` and no revocation happened since issuance: `revocation` is the user's
+ * revocation marker that was current at issuance, `null` when none was live (see
+ * {@link isUnrevoked}). `credentialVersion: null` is an enrolment link for a user without an
+ * OPAQUE credential, valid only while the user has no OPAQUE account row at all.
  */
-type ResetTokenValue = { userId: string; credentialVersion: string | null; epoch: string };
+type ResetTokenValue = {
+  userId: string;
+  credentialVersion: string | null;
+  revocation: string | null;
+};
 
 /** Reset tokens are stored only as their SHA-256, so a database leak does not yield usable links. */
 async function resetTokenIdentifier(token: string): Promise<string> {
@@ -36,30 +41,36 @@ async function resetTokenIdentifier(token: string): Promise<string> {
 }
 
 /**
- * Per-user revocation switch: one verification row holding a random epoch that every live reset
- * token carries. Deleting the row (or replacing its epoch) invalidates all outstanding tokens
- * without comparing clocks.
+ * Per-user revocation marker: a verification row holding a random value, written anew by every
+ * revocation. Readers only see the newest row (Better Auth returns the latest row per identifier,
+ * and secondary storage keeps one value per key).
  */
-function resetEpochIdentifier(userId: string): string {
-  return `opaque:reset-epoch:${userId}`;
+function resetRevocationIdentifier(userId: string): string {
+  return `opaque:reset-revocation:${userId}`;
 }
 
-/** Decodes a token row. Rows without the version and epoch bindings (0.1.x) are rejected. */
+/**
+ * A marker must outlive every link issued before it and the reset state (5 minutes) started from
+ * such a link; links live at most `MAX_RESET_EXPIRES_IN_SECONDS`. The extra hour covers the state.
+ */
+const REVOCATION_LIFETIME_MS = (MAX_RESET_EXPIRES_IN_SECONDS + 60 * 60) * 1000;
+
+/** Decodes a token row. Rows without the version and revocation bindings (0.1.x, 0.2.0) are rejected. */
 function parseResetTokenValue(raw: string): ResetTokenValue | null {
   try {
     const value: unknown = JSON.parse(raw);
     if (typeof value !== "object" || value === null) {
       return null;
     }
-    const { userId, credentialVersion, epoch } = value as Record<string, unknown>;
+    const { userId, credentialVersion, revocation } = value as Record<string, unknown>;
     if (
       typeof userId !== "string" ||
       (typeof credentialVersion !== "string" && credentialVersion !== null) ||
-      typeof epoch !== "string"
+      (typeof revocation !== "string" && revocation !== null)
     ) {
       return null;
     }
-    return { userId, credentialVersion, epoch };
+    return { userId, credentialVersion, revocation };
   } catch {
     return null;
   }
@@ -70,45 +81,50 @@ function isLive(row: { expiresAt: Date | string }): boolean {
   return new Date(row.expiresAt).getTime() > Date.now();
 }
 
-/**
- * Returns the user's epoch for a token expiring at `tokenExpiresAt`, creating the epoch row when
- * none is live and extending it so it outlives the token. Concurrent first issuances may each
- * create a row; readers only honor the newest row, so the loser's link fails closed, and the next
- * revocation removes every duplicate.
- */
-async function issueResetEpoch(
+/** The user's current revocation marker, `null` when none is live. */
+async function currentRevocation(
   ctx: GenericEndpointContext,
   userId: string,
-  tokenExpiresAt: Date,
-): Promise<string> {
-  const { internalAdapter } = ctx.context;
-  const identifier = resetEpochIdentifier(userId);
+): Promise<string | null> {
+  const row = await ctx.context.internalAdapter.findVerificationValue(
+    resetRevocationIdentifier(userId),
+  );
+  return row && isLive(row) ? row.value : null;
+}
 
-  const existing = await internalAdapter.findVerificationValue(identifier);
-  if (existing && isLive(existing)) {
-    if (new Date(existing.expiresAt).getTime() < tokenExpiresAt.getTime()) {
-      await internalAdapter.updateVerificationByIdentifier(identifier, {
-        expiresAt: tokenExpiresAt,
-      });
-    }
-    return existing.value;
-  }
-
-  // An expired row only covers expired tokens, so replacing it revokes nothing live.
-  await internalAdapter.consumeVerificationValue(identifier);
-  const epoch = randomToken();
-  await internalAdapter.createVerificationValue({
-    identifier,
-    value: epoch,
-    expiresAt: tokenExpiresAt,
+/**
+ * Invalidates every reset link and pending reset state of the user. Issuance only reads the
+ * marker, so concurrent issuances cannot invalidate each other's links, and no expiry has to be
+ * extended.
+ */
+async function revokeResetLinks(ctx: GenericEndpointContext, userId: string): Promise<void> {
+  await ctx.context.internalAdapter.createVerificationValue({
+    identifier: resetRevocationIdentifier(userId),
+    value: randomToken(),
+    expiresAt: new Date(Date.now() + REVOCATION_LIFETIME_MS),
   });
-  return epoch;
+}
+
+/**
+ * Whether no revocation happened since a link carrying `revocation` was issued. Every revocation
+ * writes a fresh random marker that outlives everything issued before it, so a live marker other
+ * than the link's means a later revocation, and no live marker means none happened while the link
+ * or its reset state could still be valid. No clocks are compared.
+ */
+async function isUnrevoked(
+  ctx: GenericEndpointContext,
+  userId: string,
+  revocation: string | null,
+): Promise<boolean> {
+  const current = await currentRevocation(ctx, userId);
+  return current === null || current === revocation;
 }
 
 /**
  * Finds the user a link is for by email, or fails with `USER_NOT_FOUND`. Without
- * `allowEnrolment` the user must own an OPAQUE credential; with it, a user without any OPAQUE
- * account row qualifies too and gets `credentialVersion: null`.
+ * `allowEnrolment` the user must own an OPAQUE credential (a legacy key-stretching profile is
+ * fine: a reset replaces it); with it, a user without any OPAQUE account row qualifies too and
+ * gets `credentialVersion: null`.
  */
 async function findResetSubject(
   ctx: GenericEndpointContext,
@@ -121,7 +137,7 @@ async function findResetSubject(
   const opaqueAccount = found?.accounts.find(
     (account) => account.providerId === OPAQUE_PROVIDER_ID,
   );
-  const credential = readCredential(opaqueAccount);
+  const credential = readCredentialRow(opaqueAccount);
   if (credential) {
     return { userId: credential.userId, credentialVersion: credential.credentialVersion };
   }
@@ -136,13 +152,20 @@ function invalidResetToken(): APIError {
   return APIError.from("BAD_REQUEST", OPAQUE_ERROR_CODES.INVALID_RESET_TOKEN);
 }
 
-/** What a valid reset token resolves to: the user and, unless it is an enrolment, the credential. */
-type ResetTarget = { userId: string; credential: OpaqueCredential | null };
+/**
+ * What a valid reset token resolves to: the user, the credential unless it is an enrolment, and
+ * the revocation marker the token carries.
+ */
+type ResetTarget = {
+  userId: string;
+  credential: OpaqueCredentialRow | null;
+  revocation: string | null;
+};
 
 /**
  * Resolves the user and credential a reset token belongs to without consuming the token.
  * Unknown, expired, orphaned, revoked, and superseded tokens (the credential changed, or an
- * enrolment target gained an OPAQUE credential, after issuance) all fail with
+ * enrolment target gained an OPAQUE account row, after issuance) all fail with
  * `INVALID_RESET_TOKEN`.
  */
 async function findResetTarget(ctx: GenericEndpointContext, token: string): Promise<ResetTarget> {
@@ -154,23 +177,27 @@ async function findResetTarget(ctx: GenericEndpointContext, token: string): Prom
     throw invalidResetToken();
   }
   const value = parseResetTokenValue(row.value);
-  if (!value) {
+  if (!value || !(await isUnrevoked(ctx, value.userId, value.revocation))) {
     throw invalidResetToken();
   }
 
-  const epochRow = await internalAdapter.findVerificationValue(resetEpochIdentifier(value.userId));
-  if (!epochRow || !isLive(epochRow) || epochRow.value !== value.epoch) {
-    throw invalidResetToken();
+  const accounts = await internalAdapter.findAccounts(value.userId);
+  const opaqueAccount = accounts.find((account) => account.providerId === OPAQUE_PROVIDER_ID);
+
+  if (value.credentialVersion === null) {
+    // An enrolment link dies with any OPAQUE row, also one whose fields do not decode: completing
+    // it could only fail, after the link was consumed.
+    if (opaqueAccount || !(await internalAdapter.findUserById(value.userId))) {
+      throw invalidResetToken();
+    }
+    return { userId: value.userId, credential: null, revocation: value.revocation };
   }
 
-  const credential = await findCredentialByUserId(ctx, value.userId);
-  if ((credential?.credentialVersion ?? null) !== value.credentialVersion) {
+  const credential = readCredentialRow(opaqueAccount);
+  if (credential?.credentialVersion !== value.credentialVersion) {
     throw invalidResetToken();
   }
-  if (!credential && !(await internalAdapter.findUserById(value.userId))) {
-    throw invalidResetToken();
-  }
-  return { userId: value.userId, credential };
+  return { userId: value.userId, credential, revocation: value.revocation };
 }
 
 /**
@@ -187,9 +214,9 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
    * that difference to unauthenticated callers.
    *
    * A token is bound to the credential version it was issued for, so any later password change
-   * or reset invalidates it. Tokens issued by 0.1.x lack the binding and are rejected. Links of
-   * one user are otherwise independent; `revokePrevious: true` first invalidates every
-   * outstanding link (see `revokePasswordResetTokens`).
+   * or reset invalidates it. Tokens issued by 0.1.x and 0.2.0 lack the current bindings and are
+   * rejected. Links of one user are otherwise independent; `revokePrevious: true` first
+   * invalidates every outstanding link (see `revokePasswordResetTokens`).
    *
    * `allowEnrolment: true` also issues a link for an existing user without an OPAQUE credential
    * (for example a classic email/password user who forgot the password before migrating). Using
@@ -211,10 +238,8 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
       await runtime.requireServerPublicKey();
 
       const subject = await findResetSubject(ctx, ctx.body.email, ctx.body.allowEnrolment === true);
-      const { internalAdapter } = ctx.context;
-
       if (ctx.body.revokePrevious) {
-        await internalAdapter.consumeVerificationValue(resetEpochIdentifier(subject.userId));
+        await revokeResetLinks(ctx, subject.userId);
       }
 
       const token = randomToken();
@@ -222,9 +247,9 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
       const value: ResetTokenValue = {
         userId: subject.userId,
         credentialVersion: subject.credentialVersion,
-        epoch: await issueResetEpoch(ctx, subject.userId, expiresAt),
+        revocation: await currentRevocation(ctx, subject.userId),
       };
-      await internalAdapter.createVerificationValue({
+      await ctx.context.internalAdapter.createVerificationValue({
         identifier: await resetTokenIdentifier(token),
         value: JSON.stringify(value),
         expiresAt,
@@ -236,9 +261,10 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
 
   /**
    * Server-only (never routed over HTTP): invalidates every outstanding reset link, enrolment
-   * links included, of the user with this email, for example when the app suspects the mailbox
-   * was exposed. Unknown emails fail with `USER_NOT_FOUND` like `createPasswordResetToken`.
-   * Links issued afterwards work normally.
+   * links included, and every reset already started from one (its complete call fails with
+   * `INVALID_RESET_TOKEN`), of the user with this email, for example when the app suspects the
+   * mailbox was exposed. Unknown emails fail with `USER_NOT_FOUND` like
+   * `createPasswordResetToken`. Links issued afterwards work normally.
    */
   const revokePasswordResetTokens = createAuthEndpoint.serverOnly(
     {
@@ -249,9 +275,7 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
     async (ctx): Promise<CredentialUpdateResponse> => {
       await runtime.requireServerPublicKey();
       const subject = await findResetSubject(ctx, ctx.body.email, true);
-      await ctx.context.internalAdapter.consumeVerificationValue(
-        resetEpochIdentifier(subject.userId),
-      );
+      await revokeResetLinks(ctx, subject.userId);
       return { status: true };
     },
   );
@@ -310,6 +334,7 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
         userId: target.userId,
         credentialId,
         credentialVersion: target.credential?.credentialVersion ?? null,
+        revocation: target.revocation,
         keyStretching: runtime.keyStretching,
       });
 
@@ -336,6 +361,10 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
       assertPayloadSupported(runtime.hooks, payload);
 
       const state = await consumeState(ctx, "reset-password", stateId);
+      // A revocation since the link was issued also cancels a reset already started from it.
+      if (!(await isUnrevoked(ctx, state.userId, state.revocation))) {
+        throw invalidResetToken();
+      }
       if (state.credentialVersion === null) {
         await attachCredential(ctx, runtime, {
           flow: "reset-password",

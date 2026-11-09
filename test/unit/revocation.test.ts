@@ -1,7 +1,7 @@
 import { client as opaqueProtocol } from "@serenity-kit/opaque";
 import type { BetterAuthOptions, SecondaryStorage } from "better-auth";
 import { beforeAll, describe, expect, test } from "vitest";
-import { OPAQUE_PATHS } from "../../src/contract.ts";
+import { OPAQUE_ACCOUNT_FIELDS, OPAQUE_PATHS } from "../../src/contract.ts";
 import { sha256 } from "../../src/server/crypto.ts";
 import {
   CHEAP_STRETCHING,
@@ -116,16 +116,20 @@ describe("password change revokes every session", () => {
   );
 
   test("the replaced session token no longer authenticates", async () => {
-    const { auth, owner, sessionRows, ownerToken } = await setUp();
+    const { auth, owner, userId, sessionRows, ownerToken } = await setUp();
+    const cookie = [...owner.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
+    const replaySession = async () =>
+      (
+        await auth.handler(
+          new Request("http://localhost:3000/api/auth/get-session", { headers: { cookie } }),
+        )
+      ).json() as Promise<{ user: { id: string } } | null>;
+    expect((await replaySession())?.user.id).toBe(userId);
+
     expect((await changePassword(owner)).error).toBeNull();
 
     expect(sessionRows().map((row) => row.token)).not.toContain(ownerToken);
-    const replay = await auth.handler(
-      new Request("http://localhost:3000/api/auth/get-session", {
-        headers: { authorization: `Bearer ${ownerToken}` },
-      }),
-    );
-    expect(await replay.json()).toBeNull();
+    expect(await replaySession()).toBeNull();
   });
 
   test.each([false, true])(
@@ -298,29 +302,91 @@ describe("reset tokens are bound to the credential and revocable", () => {
     ).rejects.toMatchObject({ body: { code: "USER_NOT_FOUND" } });
   });
 
-  test("tokens without the version and epoch binding (0.1.x) fail closed", async () => {
-    const { ctx, userId, verify } = await setUp();
-    const token = "legacy-token-without-binding";
+  test("tokens without the version and revocation binding (0.1.x, 0.2.0) fail closed", async () => {
+    const { db, ctx, userId, verify } = await setUp();
+    const legacy = "legacy-token-without-binding";
     await ctx.internalAdapter.createVerificationValue({
-      identifier: `opaque:reset-token:${await sha256(token)}`,
+      identifier: `opaque:reset-token:${await sha256(legacy)}`,
       value: JSON.stringify({ userId }),
       expiresAt: new Date(Date.now() + 60_000),
     });
-    expect(await verify(token)).toBe("INVALID_RESET_TOKEN");
+    expect(await verify(legacy)).toBe("INVALID_RESET_TOKEN");
+
+    // 0.2.0 shape: the version is current but the binding is the removed `epoch` field.
+    const credentialVersion = db.account.find((row) => row.providerId === "opaque")![
+      OPAQUE_ACCOUNT_FIELDS.credentialVersion
+    ];
+    expect(credentialVersion).toEqual(expect.any(String));
+    const epochShaped = "token-with-0-2-0-epoch-binding";
+    await ctx.internalAdapter.createVerificationValue({
+      identifier: `opaque:reset-token:${await sha256(epochShaped)}`,
+      value: JSON.stringify({ userId, credentialVersion, epoch: null }),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(await verify(epochShaped)).toBe("INVALID_RESET_TOKEN");
   });
 
-  test("the epoch row outlives the newest link", async () => {
-    const { auth, db, userId } = await setUp();
-    await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
-    const { expiresAt } = await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
+  test("concurrent issuance leaves every link valid", async () => {
+    const { issue, verify } = await setUp();
+    const [first, second] = await Promise.all([issue(), issue()]);
+    expect(await verify(first)).toBeNull();
+    expect(await verify(second)).toBeNull();
+  });
 
-    const epochRows = db.verification.filter(
-      (row) => row.identifier === `opaque:reset-epoch:${userId}`,
+  test("a link issued after a revocation survives the marker's expiry; older links need the live marker", async () => {
+    const { auth, db, userId, issue, verify } = await setUp();
+    const before = await issue();
+    await auth.api.revokePasswordResetTokens({ body: { email: EMAIL } });
+    const after = await issue();
+
+    const markers = db.verification.filter(
+      (row) => row.identifier === `opaque:reset-revocation:${userId}`,
     );
-    expect(epochRows).toHaveLength(1);
-    expect(new Date(epochRows[0]!.expiresAt as Date).getTime()).toBeGreaterThanOrEqual(
-      expiresAt.getTime(),
-    );
+    expect(markers).toHaveLength(1);
+    expect(await verify(before)).toBe("INVALID_RESET_TOKEN");
+    expect(await verify(after)).toBeNull();
+
+    markers[0]!.expiresAt = new Date(Date.now() - 1000);
+    expect(await verify(after)).toBeNull();
+  });
+
+  test("a revocation after the reset challenge cancels the started reset", async () => {
+    const { auth, db, issue } = await setUp();
+    const token = await issue();
+    const snapshot = () => ({ ...db.account.find((row) => row.providerId === "opaque")! });
+    const recordBefore = snapshot();
+
+    const registration = opaqueProtocol.startRegistration({ password: NEW });
+    const challenge = await postJson(auth, OPAQUE_PATHS.resetChallenge, {
+      token,
+      registrationRequest: registration.registrationRequest,
+    });
+    expect(challenge.status).toBe(200);
+
+    await auth.api.revokePasswordResetTokens({ body: { email: EMAIL } });
+
+    const finished = opaqueProtocol.finishRegistration({
+      password: NEW,
+      registrationResponse: challenge.body!.registrationResponse as string,
+      clientRegistrationState: registration.clientRegistrationState,
+      keyStretching: challenge.body!.keyStretching as typeof CHEAP_STRETCHING,
+    });
+    const complete = await postJson(auth, OPAQUE_PATHS.resetComplete, {
+      stateId: challenge.body!.stateId,
+      registrationRecord: finished.registrationRecord,
+    });
+    expect(complete.status).toBe(400);
+    expect(complete.body?.code).toBe("INVALID_RESET_TOKEN");
+    expect(snapshot()).toEqual(recordBefore);
+
+    expect(
+      (await createTestClient(auth).authClient.signIn.opaque({ email: EMAIL, password: OLD }))
+        .error,
+    ).toBeNull();
+    expect(
+      (await createTestClient(auth).authClient.signIn.opaque({ email: EMAIL, password: NEW }))
+        .error,
+    ).not.toBeNull();
   });
 
   test("the revoking endpoints are not reachable over HTTP", async () => {

@@ -484,6 +484,37 @@ for (const advanced of [
   });
 }
 
+for (const endpoint of ["send-otp", "verify-totp"] as const) {
+  test(`a stale challenge cookie does not affect session-bound ${endpoint}`, async () => {
+    const { browser: owner, auth, otps } = await fixture();
+    const uri = await enableTotp(owner);
+    const attacker = createTestClient(auth);
+    await pendingSignIn(attacker);
+    await replacePassword("reset", auth, owner);
+    const staleChallenge = [...attacker.cookies].filter(([name]) => name.includes("two_factor"));
+    expect(staleChallenge).toHaveLength(1);
+
+    // The challenge row stays live (nothing retired it), so only the session can let this pass:
+    // a fully signed-in client that still carries the stale cookie is answered from its session.
+    const signedIn = createTestClient(auth);
+    await pendingSignIn(signedIn, "replacement-password");
+    expect(
+      (await signedIn.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) })).error,
+    ).toBeNull();
+    expect((await signedIn.authClient.getSession()).data?.user.email).toBe(EMAIL);
+    for (const [name, value] of staleChallenge) signedIn.cookies.set(name, value);
+
+    const sentOtps = otps.length;
+    const result =
+      endpoint === "send-otp"
+        ? await signedIn.authClient.twoFactor.sendOtp()
+        : await signedIn.authClient.twoFactor.verifyTotp({ code: await totpCode(uri) });
+    expect(result.error).toBeNull();
+    expect(otps).toHaveLength(endpoint === "send-otp" ? sentOtps + 1 : sentOtps);
+    expect((await signedIn.authClient.getSession()).data?.user.email).toBe(EMAIL);
+  });
+}
+
 const CLASSIC_EMAIL = "classic@example.com";
 const CLASSIC_PASSWORD = "classic-password";
 

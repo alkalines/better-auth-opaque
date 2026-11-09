@@ -93,7 +93,7 @@ export function changePasswordEndpoints(runtime: OpaqueRuntime) {
         throw APIError.from("BAD_REQUEST", OPAQUE_ERROR_CODES.INVALID_PASSWORD);
       }
 
-      await replaceCredential(ctx, runtime, {
+      const credentialVersion = await replaceCredential(ctx, runtime, {
         flow: "change-password",
         credentialId: state.credentialId,
         expectedVersion: state.credentialVersion,
@@ -102,7 +102,12 @@ export function changePasswordEndpoints(runtime: OpaqueRuntime) {
         payload,
       });
 
-      return ctx.json(await reissueSession(ctx, session.user));
+      return ctx.json(
+        await reissueSession(ctx, session.user, {
+          credentialId: state.credentialId,
+          credentialVersion,
+        }),
+      );
     },
   );
 

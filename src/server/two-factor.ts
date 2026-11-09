@@ -317,6 +317,12 @@ export function twoFactorIntegration(runtime: OpaqueRuntime) {
       {
         matcher: (ctx) => challengePaths.includes(ctx.path ?? ""),
         handler: createAuthMiddleware(async (ctx) => {
+          // Native verification prefers a session over the `two_factor` cookie (enabling 2FA,
+          // sending a code to a signed-in user), so such a call does not act on the pending
+          // challenge: a stale cookie must neither fail it nor retire the challenge.
+          const session =
+            ctx.context.session ?? (await getSessionFromCtx(ctx, { disableCookieCache: true }));
+          if (session) return;
           const pending = await findPendingChallenge(ctx);
           if (!pending) return;
           const { snapshot } = pending;

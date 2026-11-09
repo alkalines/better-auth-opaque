@@ -88,7 +88,10 @@ export const OPAQUE_ERROR_CODES = {
     code: "INVALID_OPAQUE_MESSAGE",
     message: "Invalid OPAQUE protocol message",
   },
-  /** The reset token does not exist, was already used, or expired. */
+  /**
+   * The reset token does not exist, was already used, expired, or was revoked; also returned by
+   * reset complete when the link was revoked after the reset started.
+   */
   INVALID_RESET_TOKEN: {
     code: "INVALID_RESET_TOKEN",
     message: "Password reset token is invalid or expired",
@@ -108,8 +111,9 @@ export const OPAQUE_ERROR_CODES = {
     message: "No OPAQUE account for this user",
   },
   /**
-   * The credential changed between the challenge and the complete call, or a second-factor
-   * sign-in started with a password that has since been replaced; start over.
+   * The credential changed between the challenge and the complete call (also when it was
+   * replaced again before the caller's new session was issued), or a second-factor sign-in
+   * started with a password that has since been replaced; start over.
    */
   CREDENTIAL_CHANGED: {
     code: "CREDENTIAL_CHANGED",
@@ -593,9 +597,16 @@ export type OpaqueHooks = {
   ) => Promise<unknown> | unknown;
   /**
    * Called once per credential change of an existing user (password change, reset, attach) after
-   * the account points at `credentialVersion` and the user's sessions were revoked, also when
-   * `activatePayload` failed. Use it for audit logs or notifying other devices. A throw is
-   * returned to the client but does not roll anything back.
+   * the account points at `credentialVersion` and the plugin tried to revoke every session of the
+   * user, also when `activatePayload` failed. Use it for audit logs or notifying other devices. A
+   * throw is returned to the client but does not roll anything back.
+   *
+   * `sessionsRevoked` is `false` when the revocation failed (its error is returned to the client):
+   * sessions created with the previous password may then still be live, so revoke them yourself,
+   * e.g. by retrying `ctx.context.internalAdapter.deleteUserSessions(userId)`. Revocation deletes
+   * session rows only: with Better Auth's `session.cookieCache`, a revoked session stays usable
+   * from its cache cookie until the cache entry expires, unless `cookieCache.version` changes, for
+   * example a per-user version this hook bumps.
    */
   onCredentialChanged?: (
     input: {
@@ -603,6 +614,8 @@ export type OpaqueHooks = {
       flow: OpaqueCredentialChangeFlow;
       previousCredentialVersion: string | null;
       credentialVersion: string;
+      /** Whether every session of the user was revoked. */
+      sessionsRevoked: boolean;
     },
     ctx: OpaqueHookContext,
   ) => Promise<void> | void;

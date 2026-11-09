@@ -24,9 +24,13 @@ function invalidCredentials(): APIError {
 /**
  * A user id that no row has, in the format the database expects for `account.userId`, so the miss
  * path can run the same query as the hit path without a type error (e.g. a non-UUID string
- * against a Postgres `uuid` column) turning unknown emails into a distinguishable 500.
+ * against a Postgres `uuid` column) turning unknown emails into a distinguishable 500. The
+ * `absentUserId` option takes precedence for id formats this cannot derive.
  */
-function absentUserId(ctx: GenericEndpointContext): string {
+function absentUserId(ctx: GenericEndpointContext, runtime: OpaqueRuntime): string {
+  if (runtime.absentUserId !== undefined) {
+    return runtime.absentUserId;
+  }
   // Serial ids start at 1.
   if (ctx.context.options.advanced?.database?.generateId === "serial") {
     return "0";
@@ -66,7 +70,7 @@ export function signInEndpoints(runtime: OpaqueRuntime) {
       // adapters without native joins (e.g. Convex), and a lookup by `accountId` (not indexed in
       // Better Auth's schema) would make unknown emails slower on SQL databases.
       const accounts = await ctx.context.internalAdapter.findAccounts(
-        found?.user.id ?? absentUserId(ctx),
+        found?.user.id ?? absentUserId(ctx, runtime),
       );
       const credential = found
         ? readCredential(accounts.find((account) => account.providerId === OPAQUE_PROVIDER_ID))

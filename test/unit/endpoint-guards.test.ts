@@ -228,6 +228,14 @@ describe("server option validation", () => {
       expect.soft(() => opaque({ serverSetup, ...options } as never)).toThrow(/invalid options/);
     }
   });
+
+  test("hooks accept explicitly undefined members but not other non-functions", () => {
+    expect(() => opaque({ serverSetup, hooks: { loadPayload: undefined } } as never)).not.toThrow();
+    expect(() => opaque({ serverSetup, hooks: { loadPayload: 1 } } as never)).toThrow(
+      /invalid options/,
+    );
+    expect(() => opaque({ serverSetup, absentUserId: "" } as never)).toThrow(/invalid options/);
+  });
 });
 
 describe("per-account rate limit", () => {

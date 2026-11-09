@@ -119,7 +119,7 @@ export function attachEndpoints(runtime: OpaqueRuntime) {
         throw APIError.from("BAD_REQUEST", OPAQUE_ERROR_CODES.INVALID_STATE);
       }
 
-      await attachCredential(ctx, runtime, {
+      const credentialVersion = await attachCredential(ctx, runtime, {
         flow: "attach",
         userId: user.id,
         credentialId: state.credentialId,
@@ -129,7 +129,9 @@ export function attachEndpoints(runtime: OpaqueRuntime) {
         classicFingerprint: state.classicFingerprint,
       });
 
-      return ctx.json(await reissueSession(ctx, user));
+      return ctx.json(
+        await reissueSession(ctx, user, { credentialId: state.credentialId, credentialVersion }),
+      );
     },
   );
 

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { opaqueClient, type OpaqueClientOptions } from "../../src/client/index.ts";
-import type { OpaqueKeyStretching } from "../../src/contract.ts";
+import { OPAQUE_ACCOUNT_FIELDS, type OpaqueKeyStretching } from "../../src/contract.ts";
 import {
   CHEAP_STRETCHING,
   createMemoryDb,
@@ -239,6 +239,35 @@ describe("login challenge policy", () => {
     expect(browser.requests.some((request) => request.url.endsWith("/complete"))).toBe(false);
     expect(() => opaqueClient({ keyStretching: { login: [BROKEN] as never } })).toThrow(
       /Invalid opaqueClient options/,
+    );
+  });
+
+  test("a legacy out-of-bounds stored profile cannot sign in but can be reset", async () => {
+    const { auth, db } = await fixture();
+    const row = db.account.find((account) => account.providerId === "opaque")!;
+    row[OPAQUE_ACCOUNT_FIELDS.keyStretching] = JSON.stringify(BROKEN);
+
+    const refused = await createTestClient(auth).authClient.signIn.opaque({
+      email: EMAIL,
+      password: PASSWORD,
+    });
+    expect(refused.error?.code).toBe("INVALID_CREDENTIALS");
+
+    const { url } = await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
+    const reset = await createTestClient(auth).authClient.opaque.resetPassword({
+      token: new URL(url).searchParams.get("token")!,
+      newPassword: NEW_PASSWORD,
+    });
+    expect(reset.error).toBeNull();
+
+    const signedIn = await createTestClient(auth).authClient.signIn.opaque({
+      email: EMAIL,
+      password: NEW_PASSWORD,
+    });
+    expect(signedIn.error).toBeNull();
+    const stored = db.account.find((account) => account.providerId === "opaque")!;
+    expect(JSON.parse(stored[OPAQUE_ACCOUNT_FIELDS.keyStretching] as string)).toEqual(
+      CHEAP_STRETCHING,
     );
   });
 });

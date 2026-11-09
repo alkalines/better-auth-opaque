@@ -2,6 +2,28 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Security fixes
+
+- **security** **breaking** Reset-link revocation no longer uses a per-user epoch that every issuance created and extended. `revokePasswordResetTokens` and `createPasswordResetToken({ revokePrevious: true })` now write a fresh random marker (`opaque:reset-revocation:<userId>`, lives 7 days + 1 hour, longer than any link and its reset state); issuance only reads it, and a link is valid while no marker other than the one it carries is live. Concurrent issuances can no longer delete or outlive each other's epoch (one of two links issued together used to fail), and no expiry is extended out of order. The reset-token value is now `{ userId, credentialVersion, revocation }`.
+- **security** A revocation also cancels resets already started: the reset state carries the link's revocation marker and `/reset/opaque/complete` answers `INVALID_RESET_TOKEN` when it is no longer current.
+- **security** Enrolment links are rejected as soon as the user has any OPAQUE account row, including one whose fields do not decode; previously such a link passed `verify` and burned at `challenge`, failing only at `complete`.
+- **security** Accounts stored with a 0.1.x key-stretching profile outside the 0.2.0 bounds can be reset again (`createPasswordResetToken`, reset verify/challenge/complete replace the record and profile). They still cannot sign in, change the password or prove the password. Previously they could neither sign in nor be reset.
+- **security** Attach re-checks the classic password fingerprint after creating the OPAQUE account, so a classic password changed while `validatePayload`/`commitPayload` ran fails with `CREDENTIAL_CHANGED` and leaves no OPAQUE account. If the post-insert re-check itself fails, the new account is deleted before the error is returned, so it cannot block retries while the classic password and old sessions keep working.
+- **security** The replacement session issued by change-password and attach complete is created and then checked against the credential the flow installed; if a reset or another change replaced it in between, the session is deleted and the call fails with `CREDENTIAL_CHANGED`.
+- **security** Session-bound calls to `/two-factor/verify-totp`, `/verify-otp`, `/verify-backup-code` and `/send-otp` (enabling 2FA, sending a code to a signed-in user) are no longer refused with `CREDENTIAL_CHANGED`, nor their challenge retired, because of a stale `two_factor` cookie; Better Auth ignores that cookie when a session exists.
+
+### Features
+
+- `onCredentialChanged` receives `sessionsRevoked`, `false` when revoking the user's sessions failed. Its documentation now covers Better Auth's cookie cache, which `deleteUserSessions` does not invalidate.
+- New option `absentUserId`: the never-existing user id the sign-in challenge queries accounts for when the email is unknown, for databases that assign ids that are neither serial nor UUID-compatible.
+- `hooks` accepts members explicitly set to `undefined`.
+
+### Migration
+
+- Reset links issued by 0.2.0 stop working; issue new ones. Leftover `opaque:reset-epoch:<userId>` verification rows are unused and expire on their own.
+
 ## 0.2.0 (2026-11-08)
 
 Fixes from the 0.1.3 security review and the migration features it asked for. Several changes are breaking (marked **breaking**); see the migration notes at the end.

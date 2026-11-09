@@ -76,6 +76,15 @@ export type OpaqueOptions = {
    * Auth's `emailAndPassword.disableSignUp`, so closing registration there closes it here too.
    */
   disableSignUp?: boolean;
+  /**
+   * User id the sign-in challenge looks up accounts for when the email is unknown, so unknown and
+   * registered emails run the same query. It must have the database's user id format and never
+   * belong to a user. Defaults to `"0"` for `generateId: "serial"`, otherwise to a freshly
+   * generated id (a random UUID when the database assigns ids). Set it when the database assigns
+   * ids that are not UUID-compatible (for example integer ids with `generateId: false`), where a
+   * UUID would make the query fail for unknown emails only.
+   */
+  absentUserId?: string;
   /** Enables `auth.api.createPasswordResetToken`; the app delivers the URL itself. */
   passwordReset?: {
     /** Token lifetime in seconds, at most 7 days. Defaults to 3600. */
@@ -86,7 +95,8 @@ export type OpaqueOptions = {
 };
 
 const DEFAULT_RESET_EXPIRES_IN_SECONDS = 3600;
-const MAX_RESET_EXPIRES_IN_SECONDS = 7 * 24 * 60 * 60;
+/** Longest reset link lifetime; reset revocation markers rely on it (see `reset-password.ts`). */
+export const MAX_RESET_EXPIRES_IN_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_ATTACH_FRESH_SESSION_AGE_SECONDS = 600;
 
 const isFunction = (value: unknown) => typeof value === "function";
@@ -98,8 +108,10 @@ const isFunction = (value: unknown) => typeof value === "function";
 const optionsSchema = z.looseObject({
   keyStretching: keyStretchingSchema.optional(),
   serverIdentifier: z.string().min(1).optional(),
-  hooks: z.record(z.string(), z.custom(isFunction)).optional(),
+  // Explicitly `undefined` hooks are allowed so apps can toggle them conditionally.
+  hooks: z.record(z.string(), z.custom(isFunction).optional()).optional(),
   accountRateLimit: z.custom(isFunction).optional(),
+  absentUserId: z.string().min(1).optional(),
   disableSignUp: z.boolean().optional(),
   removeClassicCredential: z.boolean().optional(),
   attach: z
@@ -144,6 +156,8 @@ export type OpaqueRuntime = {
   passwordReset: { expiresIn: number; url: (token: string) => string } | undefined;
   attach: { requireCurrentPassword: boolean; freshSessionAge: number };
   removeClassicCredential: boolean;
+  /** Explicit `absentUserId` option; `undefined` derives one from the id configuration. */
+  absentUserId: string | undefined;
   /**
    * Consults `accountRateLimit` for the account with `email` (no-op without the option); throws
    * `TOO_MANY_ATTEMPTS` when the app refuses. Call it before any work that depends on whether the
@@ -220,6 +234,7 @@ export function createRuntime(options: OpaqueOptions): OpaqueRuntime {
       freshSessionAge: options.attach?.freshSessionAge ?? DEFAULT_ATTACH_FRESH_SESSION_AGE_SECONDS,
     },
     removeClassicCredential: options.removeClassicCredential ?? true,
+    absentUserId: options.absentUserId,
     challengeIdentity: serverIdentifier === undefined ? {} : { serverIdentifier },
 
     async checkAccountRateLimit(ctx, email, flow) {

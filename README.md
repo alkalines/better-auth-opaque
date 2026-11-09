@@ -51,17 +51,18 @@ Run your Better Auth schema generation/migration afterwards: the plugin adds `re
 
 Options (see the TSDoc on [`OpaqueOptions`](src/server/runtime.ts)):
 
-| Option                    | Default                                                  | Notes                                                                                                                                                           |
-| ------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `serverSetup`             | required                                                 | Output of `create-setup`.                                                                                                                                       |
-| `keyStretching`           | `"rfc-recommended"`                                      | Serenity key-stretching profile for new registrations. Stored per account, so changing it later keeps existing accounts working. Clients must allow it (below). |
-| `serverIdentifier`        | unset                                                    | Bound into every record. Changing it later breaks **all** existing records.                                                                                     |
-| `hooks`                   | none                                                     | App payload hooks and `onCredentialChanged`, below.                                                                                                             |
-| `passwordReset`           | none                                                     | `{ url(token), expiresIn = 3600 }` (seconds, at most 7 days) for `createPasswordResetToken`.                                                                    |
-| `disableSignUp`           | `emailAndPassword.disableSignUp`                         | Rejects OPAQUE sign-up with `SIGN_UP_DISABLED`.                                                                                                                 |
-| `accountRateLimit`        | none                                                     | `({ key, flow }, ctx) => boolean`: per-account throttle, below.                                                                                                 |
-| `attach`                  | `{ requireCurrentPassword: true, freshSessionAge: 600 }` | Migration from classic passwords, below.                                                                                                                        |
-| `removeClassicCredential` | `true`                                                   | Delete the classic `credential` account once an OPAQUE credential was attached or enrolled through reset.                                                       |
+| Option                    | Default                                                  | Notes                                                                                                                                                                    |
+| ------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `serverSetup`             | required                                                 | Output of `create-setup`.                                                                                                                                                |
+| `keyStretching`           | `"rfc-recommended"`                                      | Serenity key-stretching profile for new registrations. Stored per account, so changing it later keeps existing accounts working. Clients must allow it (below).          |
+| `serverIdentifier`        | unset                                                    | Bound into every record. Changing it later breaks **all** existing records.                                                                                              |
+| `hooks`                   | none                                                     | App payload hooks and `onCredentialChanged`, below.                                                                                                                      |
+| `passwordReset`           | none                                                     | `{ url(token), expiresIn = 3600 }` (seconds, at most 7 days) for `createPasswordResetToken`.                                                                             |
+| `disableSignUp`           | `emailAndPassword.disableSignUp`                         | Rejects OPAQUE sign-up with `SIGN_UP_DISABLED`.                                                                                                                          |
+| `accountRateLimit`        | none                                                     | `({ key, flow }, ctx) => boolean`: per-account throttle, below.                                                                                                          |
+| `attach`                  | `{ requireCurrentPassword: true, freshSessionAge: 600 }` | Migration from classic passwords, below.                                                                                                                                 |
+| `removeClassicCredential` | `true`                                                   | Delete the classic `credential` account once an OPAQUE credential was attached or enrolled through reset.                                                                |
+| `absentUserId`            | derived from the id configuration                        | User id that never exists, used to keep unknown-email sign-in queries identical. Set it when the database assigns ids that are not UUID-compatible (`"0"` for integers). |
 
 Invalid options throw at construction.
 
@@ -76,7 +77,7 @@ await sendEmail(email, url);
 
 It throws `USER_NOT_FOUND` when the email has no OPAQUE account; do not forward that difference to the requester if you want reset requests to be enumeration-safe.
 
-A link is bound to the credential it was issued for: once any reset or password change completes, every other outstanding link stops working. Issuing a new link does not invalidate earlier ones unless you pass `revokePrevious: true`; `auth.api.revokePasswordResetTokens({ body: { email } })` (server-only) invalidates all of a user's links without issuing one.
+A link is bound to the credential it was issued for: once any reset or password change completes, every other outstanding link stops working. Issuing a new link does not invalidate earlier ones unless you pass `revokePrevious: true`; `auth.api.revokePasswordResetTokens({ body: { email } })` (server-only) invalidates all of a user's links, and resets already started from them, without issuing one. Accounts registered under a 0.1.x key-stretching profile outside the current bounds cannot sign in; issue them a reset link.
 
 ### Per-account rate limit
 
@@ -160,12 +161,13 @@ opaque({
     },
     loadPayload: async ({ userId, credentialVersion }) =>
       (await db.payloads.find({ userId, credentialVersion }))?.payload ?? null,
-    // Audit log, notify other devices; runs after sessions were revoked.
+    // Audit log, notify other devices; runs after the attempt to revoke every session.
     onCredentialChanged: async ({
       userId,
       flow,
       previousCredentialVersion,
       credentialVersion,
+      sessionsRevoked, // false: revocation failed, old sessions may still be live
     }) => {},
   },
 });
