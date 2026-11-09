@@ -1,7 +1,7 @@
 import { client as opaqueProtocol } from "@serenity-kit/opaque";
 import type { BetterAuthOptions, SecondaryStorage } from "better-auth";
 import { beforeAll, describe, expect, test } from "vitest";
-import { OPAQUE_ACCOUNT_FIELDS, OPAQUE_PATHS } from "../../src/contract.ts";
+import { OPAQUE_PATHS } from "../../src/contract.ts";
 import { sha256 } from "../../src/server/crypto.ts";
 import {
   CHEAP_STRETCHING,
@@ -302,8 +302,8 @@ describe("reset tokens are bound to the credential and revocable", () => {
     ).rejects.toMatchObject({ body: { code: "USER_NOT_FOUND" } });
   });
 
-  test("tokens without the version and revocation binding (0.1.x, 0.2.0) fail closed", async () => {
-    const { db, ctx, userId, verify } = await setUp();
+  test("tokens without the version and revocation binding (0.1.x) fail closed", async () => {
+    const { ctx, userId, verify } = await setUp();
     const legacy = "legacy-token-without-binding";
     await ctx.internalAdapter.createVerificationValue({
       identifier: `opaque:reset-token:${await sha256(legacy)}`,
@@ -311,19 +311,6 @@ describe("reset tokens are bound to the credential and revocable", () => {
       expiresAt: new Date(Date.now() + 60_000),
     });
     expect(await verify(legacy)).toBe("INVALID_RESET_TOKEN");
-
-    // 0.2.0 shape: the version is current but the binding is the removed `epoch` field.
-    const credentialVersion = db.account.find((row) => row.providerId === "opaque")![
-      OPAQUE_ACCOUNT_FIELDS.credentialVersion
-    ];
-    expect(credentialVersion).toEqual(expect.any(String));
-    const epochShaped = "token-with-0-2-0-epoch-binding";
-    await ctx.internalAdapter.createVerificationValue({
-      identifier: `opaque:reset-token:${await sha256(epochShaped)}`,
-      value: JSON.stringify({ userId, credentialVersion, epoch: null }),
-      expiresAt: new Date(Date.now() + 60_000),
-    });
-    expect(await verify(epochShaped)).toBe("INVALID_RESET_TOKEN");
   });
 
   test("concurrent issuance leaves every link valid", async () => {

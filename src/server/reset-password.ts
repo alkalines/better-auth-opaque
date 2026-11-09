@@ -55,7 +55,7 @@ function resetRevocationIdentifier(userId: string): string {
  */
 const REVOCATION_LIFETIME_MS = (MAX_RESET_EXPIRES_IN_SECONDS + 60 * 60) * 1000;
 
-/** Decodes a token row. Rows without the version and revocation bindings (0.1.x, 0.2.0) are rejected. */
+/** Decodes a token row. Rows without the version and revocation bindings (0.1.x) are rejected. */
 function parseResetTokenValue(raw: string): ResetTokenValue | null {
   try {
     const value: unknown = JSON.parse(raw);
@@ -214,9 +214,9 @@ export function resetPasswordEndpoints(runtime: OpaqueRuntime) {
    * that difference to unauthenticated callers.
    *
    * A token is bound to the credential version it was issued for, so any later password change
-   * or reset invalidates it. Tokens issued by 0.1.x and 0.2.0 lack the current bindings and are
-   * rejected. Links of one user are otherwise independent; `revokePrevious: true` first
-   * invalidates every outstanding link (see `revokePasswordResetTokens`).
+   * or reset invalidates it. Tokens issued by 0.1.x lack the binding and are rejected. Links of
+   * one user are otherwise independent; `revokePrevious: true` first invalidates every
+   * outstanding link (see `revokePasswordResetTokens`).
    *
    * `allowEnrolment: true` also issues a link for an existing user without an OPAQUE credential
    * (for example a classic email/password user who forgot the password before migrating). Using
