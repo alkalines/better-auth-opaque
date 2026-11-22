@@ -47,6 +47,7 @@ export const OPAQUE_PATHS = {
  * Sign-in deliberately has a single failure code, `INVALID_CREDENTIALS`, for unknown emails,
  * emails without an OPAQUE account, and wrong passwords; the client reports a local login
  * failure (wrong password or fake record) with the same code, status, and message as the server.
+ * The one opt-in exception is `CLASSIC_CREDENTIAL` (`opaque({ signIn: { revealClassicCredential } })`).
  *
  * Sign-up for an email that already exists reuses Better Auth's own email/password behavior and
  * error codes so that both sign-up paths leak exactly the same information.
@@ -57,10 +58,23 @@ export const OPAQUE_ERROR_CODES = {
     code: "INVALID_SERVER_SETUP",
     message: "OPAQUE server setup is invalid",
   },
-  /** Sign-in failed: unknown email, no OPAQUE account, or wrong password. */
+  /**
+   * Sign-in failed: unknown email, no OPAQUE account, or wrong password. With
+   * `signIn.revealClassicCredential`, users with only a classic password get `CLASSIC_CREDENTIAL`.
+   */
   INVALID_CREDENTIALS: {
     code: "INVALID_CREDENTIALS",
     message: "Invalid email or password",
+  },
+  /**
+   * Sign-in challenge (HTTP 409), only with `opaque({ signIn: { revealClassicCredential: true } })`:
+   * the user has a classic Better Auth password and no OPAQUE account. Sign in with that password,
+   * then attach an OPAQUE credential. A hint, not proof: see the option's documentation.
+   */
+  CLASSIC_CREDENTIAL: {
+    code: "CLASSIC_CREDENTIAL",
+    message:
+      "This account uses a classic password. Sign in with it, then attach an OPAQUE password",
   },
   /**
    * OPAQUE sign-up is disabled by `opaque({ disableSignUp })` or, when that option is unset, by

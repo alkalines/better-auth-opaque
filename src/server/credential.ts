@@ -18,7 +18,7 @@ import { randomToken, sha256 } from "./crypto.ts";
 import type { OpaqueRuntime } from "./runtime.ts";
 
 /** `providerId` of Better Auth's own email/password `account` row. */
-const CLASSIC_PROVIDER_ID = "credential";
+export const CLASSIC_PROVIDER_ID = "credential";
 
 /**
  * An OPAQUE account row's identity and current registration, without its key-stretching profile:

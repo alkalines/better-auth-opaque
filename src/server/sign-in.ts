@@ -9,7 +9,7 @@ import {
   signInChallengeBodySchema,
   signInCompleteBodySchema,
 } from "../contract.ts";
-import { findCredentialById, readCredential } from "./credential.ts";
+import { CLASSIC_PROVIDER_ID, findCredentialById, readCredential } from "./credential.ts";
 import { hmacSha256 } from "./crypto.ts";
 import { sendVerificationEmail } from "./email-password-parity.ts";
 import type { OpaqueRuntime } from "./runtime.ts";
@@ -75,6 +75,19 @@ export function signInEndpoints(runtime: OpaqueRuntime) {
       const credential = found
         ? readCredential(accounts.find((account) => account.providerId === OPAQUE_PROVIDER_ID))
         : null;
+
+      // Opt-in migration signal. Decided from the rows loaded above (no extra query) and after the
+      // account rate limit, so it costs the same budget as a password guess; no state is created
+      // and the login request is not processed. Any OPAQUE row, even one that does not decode,
+      // keeps the OPAQUE path, so a user whose classic row survived an attach is never sent back.
+      if (
+        runtime.signIn.revealClassicCredential &&
+        found &&
+        !accounts.some((account) => account.providerId === OPAQUE_PROVIDER_ID) &&
+        accounts.some((account) => account.providerId === CLASSIC_PROVIDER_ID && account.password)
+      ) {
+        throw APIError.from("CONFLICT", OPAQUE_ERROR_CODES.CLASSIC_CREDENTIAL);
+      }
 
       const { serverLoginState, loginResponse } = await runtime.startLogin(
         credential?.credentialId ?? fakeIdentifier,
