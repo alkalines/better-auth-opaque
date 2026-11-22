@@ -62,6 +62,7 @@ Options (see the TSDoc on [`OpaqueOptions`](src/server/runtime.ts)):
 | `accountRateLimit`        | none                                                     | `({ key, flow }, ctx) => boolean`: per-account throttle, below.                                                                                                          |
 | `attach`                  | `{ requireCurrentPassword: true, freshSessionAge: 600 }` | Migration from classic passwords, below.                                                                                                                                 |
 | `removeClassicCredential` | `true`                                                   | Delete the classic `credential` account once an OPAQUE credential was attached or enrolled through reset.                                                                |
+| `signIn`                  | `{ revealClassicCredential: false }`                     | `revealClassicCredential: true` answers the sign-in challenge with `CLASSIC_CREDENTIAL` for users who still have only a classic password, below.                         |
 | `absentUserId`            | derived from the id configuration                        | User id that never exists, used to keep unknown-email sign-in queries identical. Set it when the database assigns ids that are not UUID-compatible (`"0"` for integers). |
 
 Invalid options throw at construction.
@@ -185,6 +186,11 @@ Users who sign in with a Better Auth email/password (`credential` account) can m
 - **Enrolment reset**: `auth.api.createPasswordResetToken({ body: { email, allowEnrolment: true } })` also issues links for users without an OPAQUE credential; `resetPassword` with such a link creates their first OPAQUE credential and revokes all sessions. `verifyResetToken` returns `loadPayload` output for `credentialVersion: null`.
 
 Both delete the classic `credential` account afterwards unless `removeClassicCredential: false`. If that step fails after the OPAQUE credential was created, finish it with the server-only `auth.api.removeClassicCredential({ body: { userId } })`. A user who already has an OPAQUE credential gets `OPAQUE_ACCOUNT_EXISTS` from attach; use `changePassword`.
+
+**Finding classic users at sign-in.** By default the sign-in challenge answers a user who has only a classic password like an unknown email, so a single OPAQUE sign-in form cannot tell them apart from a typo. With `opaque({ signIn: { revealClassicCredential: true } })` the challenge answers `CLASSIC_CREDENTIAL` (409) when the user has a classic `credential` account with a password and no OPAQUE account row; nothing about the password is sent or processed. The app can then sign in with Better Auth's `/sign-in/email` and attach. Two costs, see [docs/security.md](docs/security.md#migration-from-classic-passwords):
+
+- Anyone who can call the challenge learns that an email belongs to a user who has not migrated. With `emailAndPassword.requireEmailVerification` or `autoSignIn: false` (sign-up hides existing emails) it also reveals that the email exists; leave the option off there.
+- The answer is a hint, not proof. A compromised server can send it for a migrated user to get the plaintext password through `/sign-in/email`. If you encrypt data under the export key, never take the classic path for accounts the device has already used with OPAQUE, and turn the option off once no classic passwords remain.
 
 ## Client
 

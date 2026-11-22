@@ -71,6 +71,21 @@ export type OpaqueOptions = {
    * created by an enrolment reset, so the old password stops working. Defaults to `true`.
    */
   removeClassicCredential?: boolean;
+  /** Sign-in behavior. */
+  signIn?: {
+    /**
+     * Answer the sign-in challenge with `CLASSIC_CREDENTIAL` (409) instead of a fake login when
+     * the user has a classic Better Auth password and no OPAQUE account row, so the app can sign
+     * them in with that password and attach an OPAQUE credential. Defaults to `false`.
+     *
+     * This reveals to anyone who can call the challenge that the email belongs to a user who has
+     * not migrated (and, when sign-up hides existing emails, that the email exists). The answer is
+     * a hint, not proof: a compromised server can send it for a migrated user to receive the
+     * plaintext password, so the app must refuse the classic path for accounts it has already
+     * used with OPAQUE. Turn it off once no classic passwords remain.
+     */
+    revealClassicCredential?: boolean;
+  };
   /**
    * Rejects OPAQUE sign-up (challenge and complete) with `SIGN_UP_DISABLED`. Defaults to Better
    * Auth's `emailAndPassword.disableSignUp`, so closing registration there closes it here too.
@@ -114,6 +129,7 @@ const optionsSchema = z.looseObject({
   absentUserId: z.string().min(1).optional(),
   disableSignUp: z.boolean().optional(),
   removeClassicCredential: z.boolean().optional(),
+  signIn: z.strictObject({ revealClassicCredential: z.boolean().optional() }).optional(),
   attach: z
     .strictObject({
       requireCurrentPassword: z.boolean().optional(),
@@ -156,6 +172,7 @@ export type OpaqueRuntime = {
   passwordReset: { expiresIn: number; url: (token: string) => string } | undefined;
   attach: { requireCurrentPassword: boolean; freshSessionAge: number };
   removeClassicCredential: boolean;
+  signIn: { revealClassicCredential: boolean };
   /** Explicit `absentUserId` option; `undefined` derives one from the id configuration. */
   absentUserId: string | undefined;
   /**
@@ -234,6 +251,7 @@ export function createRuntime(options: OpaqueOptions): OpaqueRuntime {
       freshSessionAge: options.attach?.freshSessionAge ?? DEFAULT_ATTACH_FRESH_SESSION_AGE_SECONDS,
     },
     removeClassicCredential: options.removeClassicCredential ?? true,
+    signIn: { revealClassicCredential: options.signIn?.revealClassicCredential ?? false },
     absentUserId: options.absentUserId,
     challengeIdentity: serverIdentifier === undefined ? {} : { serverIdentifier },
 

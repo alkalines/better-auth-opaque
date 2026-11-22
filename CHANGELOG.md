@@ -2,6 +2,14 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 0.2.1 (2026-11-22)
+
+An opt-in sign-in signal for users who have not migrated from a classic password. No breaking changes; with the option off, behavior is unchanged.
+
+### Features
+
+- **security** `opaque({ signIn: { revealClassicCredential: true } })` (default off): the sign-in challenge answers the new error code `CLASSIC_CREDENTIAL` (409) instead of a fake login for a user who has a classic `credential` password and no OPAQUE account row, so one sign-in form can route such users to `/sign-in/email` and attach. It runs after `accountRateLimit`, creates no sign-in state and adds no query. It reveals which emails belong to users who have not migrated, and a compromised server can send it for a migrated user; see "Migrating classic passwords" in the README and `docs/security.md`. With the option off, sign-in behaves exactly as in 0.2.0.
+
 ## 0.2.0 (2026-11-09)
 
 Fixes from the 0.1.3 security review and the migration features it asked for. Several changes are breaking (marked **breaking**); see the migration notes at the end.

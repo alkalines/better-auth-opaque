@@ -404,7 +404,11 @@ export function opaqueClient(options?: OpaqueClientOptions) {
            * same `INVALID_CREDENTIALS` error; when the local OPAQUE step already fails, no
            * complete request is made. A 2FA redirect also returns the locally derived export key,
            * but never a session or payload; verify the second factor, then call loadSignInPayload.
-           * The server's stored profile must be accepted by the local login policy.
+           * The server's stored profile must be accepted by the local login policy. With the
+           * server's `signIn.revealClassicCredential`, a user who has only a classic password gets
+           * `CLASSIC_CREDENTIAL` (409) from the challenge. Treat it as a hint, not proof: the app
+           * decides whether to send that password to `/sign-in/email`, and must not for accounts it
+           * has already used with OPAQUE.
            */
           opaque: async (
             input: OpaqueSignInInput,
