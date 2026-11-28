@@ -2,9 +2,9 @@ import { client as opaqueProtocol } from "@serenity-kit/opaque";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createTestAuth,
   createTestClient,
+  createTestDb,
   postJson,
   serverSetupForTests,
 } from "./helpers.ts";
@@ -15,7 +15,7 @@ describe("sign-in enumeration resistance", () => {
   beforeAll(async () => {
     const serverSetup = await serverSetupForTests();
     auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
       options: { emailAndPassword: { enabled: true } },
     });

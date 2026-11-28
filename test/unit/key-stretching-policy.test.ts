@@ -3,10 +3,10 @@ import { opaqueClient, type OpaqueClientOptions } from "../../src/client/index.t
 import { OPAQUE_ACCOUNT_FIELDS, type OpaqueKeyStretching } from "../../src/contract.ts";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
+  createTestDb,
   serverSetupForTests,
 } from "./helpers.ts";
 
@@ -45,7 +45,7 @@ function rewriteChallenge(
 
 async function fixture() {
   const app = createPayloadApp();
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const auth = createTestAuth({
     db,
     opaque: {
@@ -244,8 +244,10 @@ describe("login challenge policy", () => {
 
   test("a legacy out-of-bounds stored profile cannot sign in but can be reset", async () => {
     const { auth, db } = await fixture();
-    const row = db.account.find((account) => account.providerId === "opaque")!;
-    row[OPAQUE_ACCOUNT_FIELDS.keyStretching] = JSON.stringify(BROKEN);
+    const row = (await db.rows("account")).find((account) => account.providerId === "opaque")!;
+    await db.update("account", row.id as string, {
+      [OPAQUE_ACCOUNT_FIELDS.keyStretching]: JSON.stringify(BROKEN),
+    });
 
     const refused = await createTestClient(auth).authClient.signIn.opaque({
       email: EMAIL,
@@ -265,7 +267,7 @@ describe("login challenge policy", () => {
       password: NEW_PASSWORD,
     });
     expect(signedIn.error).toBeNull();
-    const stored = db.account.find((account) => account.providerId === "opaque")!;
+    const stored = (await db.rows("account")).find((account) => account.providerId === "opaque")!;
     expect(JSON.parse(stored[OPAQUE_ACCOUNT_FIELDS.keyStretching] as string)).toEqual(
       CHEAP_STRETCHING,
     );

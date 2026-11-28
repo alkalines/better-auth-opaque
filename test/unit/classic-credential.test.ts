@@ -4,9 +4,9 @@ import { opaque } from "../../src/index.ts";
 import {
   type AuthUnderTest,
   CHEAP_STRETCHING,
-  createMemoryDb,
   createTestAuth,
   createTestClient,
+  createTestDb,
   expectNotSent,
   postJson,
   serverSetupForTests,
@@ -26,7 +26,7 @@ beforeAll(async () => {
  * password (social-only).
  */
 async function setUp(accountRateLimit?: (input: { key: string }) => boolean) {
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const auth = createTestAuth({
     db,
     opaque: {
@@ -57,15 +57,17 @@ async function setUp(accountRateLimit?: (input: { key: string }) => boolean) {
     throw new Error("classic-credential fixture setup failed");
   }
 
-  const passwordlessId = db.user.find((user) => user.email === "passwordless@example.com")?.id;
-  for (const account of db.account) {
+  const passwordlessId = (await db.rows("user")).find(
+    (user) => user.email === "passwordless@example.com",
+  )?.id;
+  for (const account of await db.rows("account")) {
     if (account.userId === passwordlessId) {
-      account.password = null;
+      await db.update("account", account.id as string, { password: null });
     }
   }
   // A classic row left behind by an interrupted removal, next to the OPAQUE credential.
   const migratedId = migrated.data.user.id;
-  db.account.push({
+  await db.insert("account", {
     id: "leftover-classic",
     accountId: migratedId,
     providerId: "credential",
@@ -93,13 +95,13 @@ describe("signIn.revealClassicCredential", () => {
       keys.push(key);
       return true;
     });
-    const statesBefore = db.verification.length;
+    const statesBefore = (await db.rows("verification")).length;
 
     const response = await challenge(auth, "Classic@Example.com");
 
     expect(response.status).toBe(409);
     expect(response.body?.code).toBe("CLASSIC_CREDENTIAL");
-    expect(db.verification.length).toBe(statesBefore);
+    expect((await db.rows("verification")).length).toBe(statesBefore);
     expect(keys).toHaveLength(1);
   });
 
@@ -143,7 +145,7 @@ describe("signIn.revealClassicCredential", () => {
 
   test("a refused account rate limit answers before the classic check", async () => {
     const { auth, db } = await setUp(() => false);
-    const statesBefore = db.verification.length;
+    const statesBefore = (await db.rows("verification")).length;
 
     const classic = await challenge(auth, "classic@example.com");
     const unknown = await challenge(auth, "unknown@example.com");
@@ -151,7 +153,7 @@ describe("signIn.revealClassicCredential", () => {
     expect(classic.status).toBe(429);
     expect(classic.body?.code).toBe("TOO_MANY_ATTEMPTS");
     expect(unknown).toEqual(classic);
-    expect(db.verification.length).toBe(statesBefore);
+    expect((await db.rows("verification")).length).toBe(statesBefore);
   });
 
   test("an invalid option value throws at construction", () => {

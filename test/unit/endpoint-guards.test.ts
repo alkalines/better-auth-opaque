@@ -1,16 +1,14 @@
 import { client as opaqueProtocol } from "@serenity-kit/opaque";
-import { betterAuth, type BetterAuthOptions } from "better-auth";
-import { memoryAdapter } from "better-auth/adapters/memory";
+import type { BetterAuthOptions } from "better-auth";
 import { beforeAll, describe, expect, test } from "vitest";
 import { opaque } from "../../src/server/index.ts";
 import {
-  BASE_URL,
+  type AdapterFactory,
   CHEAP_STRETCHING,
-  createMemoryDb,
   createTestAuth,
   createTestClient,
+  createTestDb,
   postJson,
-  SECRET,
   serverSetupForTests,
 } from "./helpers.ts";
 
@@ -23,9 +21,9 @@ const loginRequest = () => opaqueProtocol.startLogin({ password: "x" }).startLog
 const registrationRequest = () =>
   opaqueProtocol.startRegistration({ password: "x" }).registrationRequest;
 
-function authWithOriginCheck() {
+async function authWithOriginCheck() {
   return createTestAuth({
-    db: createMemoryDb(),
+    db: await createTestDb(),
     opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     options: { advanced: { disableOriginCheck: false } },
   });
@@ -35,7 +33,7 @@ describe("first-login CSRF protection", () => {
   const evil = { origin: "https://evil.example" };
 
   test("cookie-less cross-site requests are rejected like native sign-in and sign-up", async () => {
-    const auth = authWithOriginCheck();
+    const auth = await authWithOriginCheck();
     const requests: [string, unknown][] = [
       ["/sign-in/opaque/challenge", { email: "a@example.com", loginRequest: loginRequest() }],
       ["/sign-in/opaque/complete", { stateId: "x", loginFinalization: "AA" }],
@@ -52,7 +50,7 @@ describe("first-login CSRF protection", () => {
   });
 
   test("the trusted origin still signs up and signs in", async () => {
-    const auth = authWithOriginCheck();
+    const auth = await authWithOriginCheck();
     const browser = createTestClient(auth);
     const signUp = await browser.authClient.signUp.opaque({
       email: "csrf@example.com",
@@ -70,7 +68,7 @@ describe("first-login CSRF protection", () => {
 
 describe("sign-up switch", () => {
   test("emailAndPassword.disableSignUp closes OPAQUE sign-up at the challenge", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({
       db,
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
@@ -84,13 +82,13 @@ describe("sign-up switch", () => {
     });
     expect(result.error?.code).toBe("SIGN_UP_DISABLED");
     expect(result.error?.status).toBe(400);
-    expect(db.user).toHaveLength(0);
+    expect(await db.rows("user")).toHaveLength(0);
     expect(browser.requests.some((request) => request.url.endsWith("/complete"))).toBe(false);
   });
 
   test("the plugin option overrides the Better Auth flag in both directions", async () => {
     const open = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING, disableSignUp: false },
       options: { emailAndPassword: { enabled: true, disableSignUp: true } },
     });
@@ -102,7 +100,7 @@ describe("sign-up switch", () => {
     expect(opened.error).toBeNull();
 
     const closed = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING, disableSignUp: true },
     });
     const refused = await createTestClient(closed).authClient.signUp.opaque({
@@ -114,7 +112,7 @@ describe("sign-up switch", () => {
   });
 
   test("a challenge issued before sign-up was closed cannot complete", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const options = { serverSetup, keyStretching: CHEAP_STRETCHING };
     const before = createTestAuth({ db, opaque: options });
     const registration = opaqueProtocol.startRegistration({ password: "pw-late" });
@@ -138,21 +136,20 @@ describe("sign-up switch", () => {
     });
     expect(complete.status).toBe(400);
     expect(complete.body?.code).toBe("SIGN_UP_DISABLED");
-    expect(db.user).toHaveLength(0);
+    expect(await db.rows("user")).toHaveLength(0);
   });
 });
 
 describe("sign-in challenge database work", () => {
   for (const generateId of [undefined, "uuid", "serial"] as const) {
     test(`known, account-less and unknown emails run the same adapter reads (generateId: ${generateId ?? "default"})`, async () => {
-      const db = createMemoryDb();
+      const db = await createTestDb(generateId ? { generateId } : {});
       let reads: string[] = [];
-      const factory = memoryAdapter(db);
       type Read = { model: string; where?: { field: string }[] };
       const record = (method: string, args: Read) =>
         reads.push(`${method} ${args.model} ${(args.where ?? []).map((w) => w.field).join(",")}`);
       const counting = ((options: BetterAuthOptions) => {
-        const adapter = factory(options);
+        const adapter = db.database(options);
         return {
           ...adapter,
           findOne: (args: Read) => {
@@ -164,16 +161,11 @@ describe("sign-in challenge database work", () => {
             return adapter.findMany(args as Parameters<typeof adapter.findMany>[0]);
           },
         };
-      }) as typeof factory;
-      const auth = betterAuth({
-        baseURL: BASE_URL,
-        secret: SECRET,
-        database: counting,
-        rateLimit: { enabled: false },
-        logger: { disabled: true },
-        emailAndPassword: { enabled: true },
-        advanced: generateId ? { database: { generateId } } : undefined,
-        plugins: [opaque({ serverSetup, keyStretching: CHEAP_STRETCHING })],
+      }) as AdapterFactory;
+      const auth = createTestAuth({
+        db: { ...db, database: counting },
+        opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
+        options: { emailAndPassword: { enabled: true } },
       });
       expect(
         (
@@ -243,7 +235,7 @@ describe("per-account rate limit", () => {
     const calls: { key: string; flow: string }[] = [];
     let allow = true;
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: {
         serverSetup,
         keyStretching: CHEAP_STRETCHING,
@@ -284,7 +276,7 @@ describe("per-account rate limit", () => {
 
 describe("registration record validation", () => {
   test("sign-up rejects a record serenity cannot load and creates no user", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({ db, opaque: { serverSetup, keyStretching: CHEAP_STRETCHING } });
     const challenge = await postJson(auth, "/sign-up/opaque/challenge", {
       email: "garbage@example.com",
@@ -298,7 +290,7 @@ describe("registration record validation", () => {
     });
     expect(complete.status).toBe(400);
     expect(complete.body?.code).toBe("INVALID_OPAQUE_MESSAGE");
-    expect(db.user).toHaveLength(0);
-    expect(db.account).toHaveLength(0);
+    expect(await db.rows("user")).toHaveLength(0);
+    expect(await db.rows("account")).toHaveLength(0);
   });
 });

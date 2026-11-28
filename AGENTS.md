@@ -22,10 +22,11 @@
   - `typecheck`: TypeScript over the package, examples, and tests.
   - `test`: Vitest with Node and edge-runtime projects.
   - `test:convex`: tests against a real local Convex backend in `test/convex`.
+  - `test:drizzle`: the `test/unit` suite against Better Auth's Drizzle adapter on Postgres (`DATABASE_URL`, default `postgres://radium:radium@localhost:5432/opaque_test`) with Redis/Valkey secondary storage (`REDIS_URL`, default `redis://localhost:6379`), once on Node and once on Bun, in `test/drizzle`.
   - `test:e2e`: Playwright Chromium against `examples/tanstack-start`.
   - `build`: tsdown.
   - `check:package`: publint and Are The Types Wrong against the built package.
-- Workspaces: the root is the published package; `examples/*` and `test/convex` are private workspaces and never published.
+- Workspaces: the root is the published package; `examples/*`, `test/convex` and `test/drizzle` are private workspaces and never published.
 - `OPAQUE_SERVER_SETUP` for examples and fixtures comes from `bun run create-setup`. **Never commit a real setup.** `.env*` files are gitignored except `.env.example`.
 
 ## Code ownership
@@ -56,11 +57,11 @@
 ## Verification
 
 - Test observable behavior and security boundaries—single use, enumeration resistance, export key equality between registration and login, fail-closed setup—not implementation details, mock call counts, or library behavior. Extend focused coverage for actual regressions; do not add suites simply to increase test count. Preserve useful coverage when consolidating redundant tests.
-- Unit tests use Better Auth with the memory adapter; they are fast regression checks, **not integration verification**. Convex claims need `test:convex` against a real local backend; browser claims need `test:e2e`. If prerequisites or permission are missing, report that verification as blocked; do not substitute more mocks or claim end-to-end success.
+- Unit tests use Better Auth with the memory adapter; they are fast regression checks, **not integration verification**. Tests get their storage from `createTestDb` (`test/unit/helpers.ts`) and read or change rows only through it, so `test:drizzle` can run them on a real database. Convex claims need `test:convex` against a real local backend; Drizzle/Postgres and Bun claims need `test:drizzle`; browser claims need `test:e2e`. If prerequisites or permission are missing, report that verification as blocked; do not substitute more mocks or claim end-to-end success.
 - Report which of unit, runtime, Convex, and browser checks ran, and which were skipped and why.
 
 ## Generated files and workflow
 
-- Never hand-edit generated files (`dist/`, Convex `_generated/` in `test/convex`, route trees in examples). Review generated diffs; a build does not prove runtime support.
+- Never hand-edit generated files (`dist/`, Convex `_generated/` in `test/convex`, the Drizzle schemas in `test/drizzle/generated`, route trees in examples). Review generated diffs; a build does not prove runtime support.
 - Do not present an intended or untested path as a working quickstart. Distinguish intended work from implemented and verified behavior.
 - Work on task branches and integrate through PRs targeting `main`; do not commit directly to `main`. Do not commit, push, open or merge PRs, tag, or publish without explicit authorization.

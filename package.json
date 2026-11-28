@@ -24,7 +24,8 @@
   },
   "workspaces": [
     "examples/*",
-    "test/convex"
+    "test/convex",
+    "test/drizzle"
   ],
   "files": [
     "dist",
@@ -57,6 +58,7 @@
     "lint": "oxlint",
     "test": "vitest run",
     "test:convex": "bun run --cwd test/convex test",
+    "test:drizzle": "bun run --cwd test/drizzle test",
     "test:e2e": "bun run --cwd examples/tanstack-start test:e2e",
     "typecheck": "tsc -p tsconfig.json && bun run build && bun run --workspaces --if-present typecheck"
   },

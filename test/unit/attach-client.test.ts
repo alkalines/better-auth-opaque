@@ -1,10 +1,10 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
+  createTestDb,
   expectNotSent,
   postJson,
   serverSetupForTests,
@@ -41,7 +41,7 @@ function rewriteChallenge(
 async function classicUser(requireCurrentPassword = true) {
   const app = createPayloadApp();
   const auth = createTestAuth({
-    db: createMemoryDb(),
+    db: await createTestDb(),
     options: { emailAndPassword: { enabled: true } },
     opaque: {
       serverSetup,

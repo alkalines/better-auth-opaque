@@ -1,0 +1,25 @@
+{
+  "name": "@alkalines/better-auth-opaque-drizzle-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "bun scripts/generate-schema.ts",
+    "test": "bun scripts/run.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@better-auth/redis-storage": "1.7.18",
+    "better-auth": "1.7.18",
+    "drizzle-orm": "0.45.4",
+    "ioredis": "5.11.1",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "auth": "1.7.18",
+    "drizzle-kit": "0.31.11",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

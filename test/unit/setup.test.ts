@@ -3,9 +3,9 @@ import { OPAQUE_PATHS } from "../../src/contract.ts";
 import { opaque } from "../../src/server/index.ts";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createTestAuth,
   createTestClient,
+  createTestDb,
   postJson,
   serverSetupForTests,
 } from "./helpers.ts";
@@ -17,7 +17,7 @@ describe("server setup", () => {
   });
 
   test("an invalid setup fails every flow closed", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const validSetup = await serverSetupForTests();
 
     // A session created while the setup was valid, to get past the session middleware.
@@ -71,7 +71,7 @@ describe("server setup", () => {
     };
     expect(Object.keys(bodies).toSorted()).toEqual(Object.values(OPAQUE_PATHS).toSorted());
 
-    const verificationRowsBefore = db.verification.length;
+    const verificationRowsBefore = (await db.rows("verification")).length;
     for (const [path, body] of Object.entries(bodies)) {
       const response = await postJson(invalid, path, body, { cookie });
       expect({ path, status: response.status, code: response.body?.code }).toEqual({
@@ -80,7 +80,7 @@ describe("server setup", () => {
         code: "INVALID_SERVER_SETUP",
       });
     }
-    expect(db.verification.length).toBe(verificationRowsBefore);
+    expect((await db.rows("verification")).length).toBe(verificationRowsBefore);
 
     await expect(invalid.api.validateOpaqueSetup()).rejects.toMatchObject({
       body: { code: "INVALID_SERVER_SETUP" },

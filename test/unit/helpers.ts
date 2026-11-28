@@ -1,4 +1,5 @@
 import { ready, server } from "@serenity-kit/opaque";
+import type { DBAdapter } from "@better-auth/core/db/adapter";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { createAuthClient } from "better-auth/client";
@@ -24,7 +25,10 @@ export async function serverSetupForTests(): Promise<string> {
   testSetup ??= server.createSetup();
   return testSetup;
 }
-type Row = Record<string, unknown>;
+
+export type Row = Record<string, unknown>;
+
+/** Arrays of the memory adapter; also used directly by tests that need memory-only plugins. */
 export type MemoryDb = {
   user: Row[];
   session: Row[];
@@ -37,8 +41,68 @@ export function createMemoryDb(): MemoryDb {
   return { user: [], session: [], account: [], verification: [] };
 }
 
-type AdapterFactory = ReturnType<typeof memoryAdapter>;
-type Adapter = ReturnType<AdapterFactory>;
+/** Better Auth's `database` option in factory form, which every adapter returns. */
+export type AdapterFactory = (options: BetterAuthOptions) => DBAdapter<BetterAuthOptions>;
+
+/** Id strategies a test can ask for (`advanced.database.generateId`); default: random text ids. */
+export type TestIdFormat = "uuid" | "serial";
+
+/**
+ * The storage one test runs against, empty and isolated from other tests, plus direct row
+ * access below Better Auth (no hooks, no plugin code) to set up and check state.
+ */
+export type TestDb = {
+  /** Better Auth's `database` option. */
+  database: AdapterFactory;
+  /** Further Better Auth options the storage needs (secondary storage, id strategy). */
+  options: Partial<BetterAuthOptions>;
+  /** Every row of a model. `verification` rows come from secondary storage when there is one. */
+  rows(model: string): Promise<Row[]>;
+  insert(model: string, row: Row): Promise<void>;
+  update(model: string, id: unknown, values: Row): Promise<void>;
+};
+
+/** Creates a fresh {@link TestDb}; see {@link useTestBackend}. */
+export type TestBackend = (input: { generateId?: TestIdFormat }) => Promise<TestDb>;
+
+async function memoryBackend(input: { generateId?: TestIdFormat }): Promise<TestDb> {
+  const db = createMemoryDb();
+  const table = (model: string) => (db[model] ??= []);
+  return {
+    database: memoryAdapter(db),
+    options: input.generateId ? { advanced: { database: { generateId: input.generateId } } } : {},
+    // Copies, so a test cannot pass by mutating rows in place (which no real database allows).
+    rows: async (model) => table(model).map((row) => ({ ...row })),
+    insert: async (model, row) => {
+      table(model).push(row);
+    },
+    update: async (model, id, values) => {
+      for (const row of table(model)) {
+        if (row.id === id) {
+          Object.assign(row, values);
+        }
+      }
+    },
+  };
+}
+
+let testBackend: TestBackend = memoryBackend;
+
+/**
+ * Replaces the memory adapter for every {@link createTestDb} of the current test file. Integration
+ * workspaces (`test/drizzle`) call it from a Vitest setup file to run this suite against a real
+ * database; unit runs keep the memory adapter.
+ */
+export function useTestBackend(backend: TestBackend): void {
+  testBackend = backend;
+}
+
+/** An empty database for one test, from the active backend (memory unless replaced). */
+export function createTestDb(input: { generateId?: TestIdFormat } = {}): Promise<TestDb> {
+  return testBackend(input);
+}
+
+type Adapter = DBAdapter<BetterAuthOptions>;
 
 /**
  * Makes account updates fail on demand at the adapter level: `account.update` throws before
@@ -49,7 +113,7 @@ function withAccountUpdateFaults(
   factory: AdapterFactory,
   faults: ReadonlySet<FaultPoint>,
 ): AdapterFactory {
-  return ((options: BetterAuthOptions) => {
+  return (options) => {
     const adapter = factory(options);
     const update = async (args: Parameters<Adapter["update"]>[0]) => {
       if (args.model === "account" && faults.has("account.update")) {
@@ -62,7 +126,7 @@ function withAccountUpdateFaults(
       return updated;
     };
     return { ...adapter, update: update as Adapter["update"] };
-  }) as AdapterFactory;
+  };
 }
 
 /**
@@ -70,7 +134,7 @@ function withAccountUpdateFaults(
  * `transaction: false`). Better Auth then runs "transactions" as-is.
  */
 function withoutTransactions(factory: AdapterFactory): AdapterFactory {
-  return ((options: BetterAuthOptions) => {
+  return (options) => {
     const adapter = factory(options);
     const nonTransactional: Adapter = {
       ...adapter,
@@ -81,20 +145,20 @@ function withoutTransactions(factory: AdapterFactory): AdapterFactory {
       transaction: (callback) => callback(nonTransactional),
     } as Adapter;
     return nonTransactional;
-  }) as AdapterFactory;
+  };
 }
 
 export type AuthUnderTest = ReturnType<typeof createTestAuth>;
 
-/** Builds Better Auth with the memory adapter and the OPAQUE plugin. */
+/** Builds Better Auth on the test database with the OPAQUE plugin. */
 export function createTestAuth(input: {
-  db: MemoryDb;
+  db: TestDb;
   opaque: OpaqueOptions;
   transactions?: boolean;
   faults?: ReadonlySet<FaultPoint>;
   options?: Partial<BetterAuthOptions>;
 }) {
-  let database = withAccountUpdateFaults(memoryAdapter(input.db), input.faults ?? new Set());
+  let database = withAccountUpdateFaults(input.db.database, input.faults ?? new Set());
   if (input.transactions === false) {
     database = withoutTransactions(database);
   }
@@ -104,6 +168,7 @@ export function createTestAuth(input: {
     database,
     rateLimit: { enabled: false },
     logger: { disabled: true },
+    ...input.db.options,
     ...input.options,
     plugins: [opaque(input.opaque)],
   });
@@ -213,8 +278,16 @@ export type FaultPoint =
   | "account.update.after-commit"
   | "session.create";
 
-/** Hooks a test can hold open to interleave concurrent flows deterministically. */
-export type PausePoint = "commitPayload" | "loadPayload";
+/**
+ * Hooks a test can hold open to interleave concurrent flows deterministically. The `account.*`
+ * points are Better Auth database hooks: right after an account row was written, right before
+ * one is deleted.
+ */
+export type PausePoint =
+  | "commitPayload"
+  | "loadPayload"
+  | "account.create.after"
+  | "account.delete.before";
 
 /**
  * An app-side payload store implementing the hooks the way the contract asks (payloads per
@@ -267,6 +340,14 @@ export function createPayloadApp() {
           if (faults.has("account.create.rejected")) {
             return false;
           }
+        },
+        after: async () => {
+          await pauses.get("account.create.after")?.();
+        },
+      },
+      delete: {
+        before: async () => {
+          await pauses.get("account.delete.before")?.();
         },
       },
     },

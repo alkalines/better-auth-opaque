@@ -35,6 +35,45 @@ jobs:
       - run: bun run build
       - run: bun run test:convex
 
+  drizzle:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
+      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: radium
+          POSTGRES_PASSWORD: radium
+          POSTGRES_DB: opaque_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U radium" --health-interval 5s --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:9
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 5s --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - run: bun run test:drizzle
+
   e2e:
     if: >-
       github.event_name != 'pull_request' ||

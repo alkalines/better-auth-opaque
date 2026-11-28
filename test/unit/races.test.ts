@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "vitest";
 import type { OpaqueHooks } from "../../src/contract.ts";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
+  createTestDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
@@ -26,7 +26,7 @@ function gate() {
 
 async function setUpUser() {
   const app = createPayloadApp();
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const auth = createTestAuth({
     db,
     opaque: {
@@ -136,13 +136,13 @@ describe("concurrent credential replacement", () => {
     const result = await signIn;
     expect(result.data).toBeNull();
     expect(result.error?.code).toBe("INVALID_CREDENTIALS");
-    expect(db.session).toHaveLength(0);
+    expect(await db.rows("session")).toHaveLength(0);
     expect((await attacker.authClient.getSession()).data).toBeNull();
   });
 
   test("a password change whose replacement session loses to a reset leaves no session", async () => {
     const app = createPayloadApp();
-    const db = createMemoryDb();
+    const db = await createTestDb();
     // Hold the change's activatePayload (after its switch) open once; the reset's is not held.
     const changeSwitched = gate();
     const resetDone = gate();
@@ -194,7 +194,7 @@ describe("concurrent credential replacement", () => {
 
     const changed = await changing;
     expect(changed.error).toMatchObject({ status: 409, code: "CREDENTIAL_CHANGED" });
-    expect(db.session).toHaveLength(0);
+    expect(await db.rows("session")).toHaveLength(0);
     expect((await owner.authClient.getSession()).data).toBeNull();
 
     const browser = createTestClient(auth);

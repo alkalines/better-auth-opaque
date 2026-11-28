@@ -5,7 +5,7 @@ import { OPAQUE_PATHS } from "../../src/contract.ts";
 import { sha256 } from "../../src/server/crypto.ts";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
+  createTestDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
@@ -51,7 +51,7 @@ function createSecondaryStorage(): SecondaryStorage & { keys: () => string[] } {
 const passwordReset = { url: (token: string) => `http://localhost:3000/reset?token=${token}` };
 
 async function setUp(options?: Partial<BetterAuthOptions>) {
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const app = createPayloadApp();
   const auth = createTestAuth({
     db,
@@ -63,7 +63,7 @@ async function setUp(options?: Partial<BetterAuthOptions>) {
   expect(signUp.error).toBeNull();
   const userId = signUp.data!.user.id as string;
   const ctx = await auth.$context;
-  const sessionRows = () => db.session.filter((row) => row.userId === userId);
+  const sessionRows = async () => (await db.rows("session")).filter((row) => row.userId === userId);
   const issue = async (revokePrevious?: boolean) => {
     const { url } = await auth.api.createPasswordResetToken({
       body: { email: EMAIL, revokePrevious },
@@ -104,14 +104,14 @@ describe("password change revokes every session", () => {
       expect(
         (await attacker.authClient.signIn.opaque({ email: EMAIL, password: OLD })).error,
       ).toBeNull();
-      expect(sessionRows()).toHaveLength(122);
+      expect(await sessionRows()).toHaveLength(122);
 
       expect((await changePassword(owner)).error).toBeNull();
 
       expect((await attacker.authClient.getSession()).data).toBeNull();
       expect((await owner.authClient.getSession()).data?.user.id).toBe(userId);
-      expect(sessionRows()).toHaveLength(1);
-      expect(sessionRows()[0]?.token).not.toBe(ownerToken);
+      expect(await sessionRows()).toHaveLength(1);
+      expect((await sessionRows())[0]?.token).not.toBe(ownerToken);
     },
   );
 
@@ -128,7 +128,7 @@ describe("password change revokes every session", () => {
 
     expect((await changePassword(owner)).error).toBeNull();
 
-    expect(sessionRows().map((row) => row.token)).not.toContain(ownerToken);
+    expect((await sessionRows()).map((row) => row.token)).not.toContain(ownerToken);
     expect(await replaySession()).toBeNull();
   });
 
@@ -182,8 +182,8 @@ describe("password change revokes every session", () => {
       ).error,
     ).toBeNull();
 
-    expect(sessionRows()).toHaveLength(1);
-    const lifetimeMs = new Date(sessionRows()[0]!.expiresAt as Date).getTime() - Date.now();
+    expect(await sessionRows()).toHaveLength(1);
+    const lifetimeMs = new Date((await sessionRows())[0]!.expiresAt as Date).getTime() - Date.now();
     expect(lifetimeMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
     // The owner's own session was revoked too.
     expect((await owner.authClient.getSession()).data).toBeNull();
@@ -201,7 +201,7 @@ describe("password change revokes every session", () => {
     app.faults.clear();
 
     expect(changed.error).not.toBeNull();
-    expect(sessionRows()).toHaveLength(0);
+    expect(await sessionRows()).toHaveLength(0);
     expect((await attacker.authClient.getSession()).data).toBeNull();
     expect((await owner.authClient.getSession()).data).toBeNull();
     const signIn = await createTestClient(auth).authClient.signIn.opaque({
@@ -326,22 +326,26 @@ describe("reset tokens are bound to the credential and revocable", () => {
     await auth.api.revokePasswordResetTokens({ body: { email: EMAIL } });
     const after = await issue();
 
-    const markers = db.verification.filter(
+    const markers = (await db.rows("verification")).filter(
       (row) => row.identifier === `opaque:reset-revocation:${userId}`,
     );
     expect(markers).toHaveLength(1);
     expect(await verify(before)).toBe("INVALID_RESET_TOKEN");
     expect(await verify(after)).toBeNull();
 
-    markers[0]!.expiresAt = new Date(Date.now() - 1000);
+    await db.update("verification", markers[0]!.id as string, {
+      expiresAt: new Date(Date.now() - 1000),
+    });
     expect(await verify(after)).toBeNull();
   });
 
   test("a revocation after the reset challenge cancels the started reset", async () => {
     const { auth, db, issue } = await setUp();
     const token = await issue();
-    const snapshot = () => ({ ...db.account.find((row) => row.providerId === "opaque")! });
-    const recordBefore = snapshot();
+    const snapshot = async () => ({
+      ...(await db.rows("account")).find((row) => row.providerId === "opaque")!,
+    });
+    const recordBefore = await snapshot();
 
     const registration = opaqueProtocol.startRegistration({ password: NEW });
     const challenge = await postJson(auth, OPAQUE_PATHS.resetChallenge, {
@@ -364,7 +368,7 @@ describe("reset tokens are bound to the credential and revocable", () => {
     });
     expect(complete.status).toBe(400);
     expect(complete.body?.code).toBe("INVALID_RESET_TOKEN");
-    expect(snapshot()).toEqual(recordBefore);
+    expect(await snapshot()).toEqual(recordBefore);
 
     expect(
       (await createTestClient(auth).authClient.signIn.opaque({ email: EMAIL, password: OLD }))

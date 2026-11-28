@@ -1,12 +1,12 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
+  createTestDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
   type FaultPoint,
-  type MemoryDb,
+  type TestDb,
   serverSetupForTests,
 } from "./helpers.ts";
 
@@ -16,9 +16,9 @@ beforeAll(async () => {
   serverSetup = await serverSetupForTests();
 });
 
-function setUp(transactions: boolean) {
+async function setUp(transactions: boolean) {
   const app = createPayloadApp();
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const auth = createTestAuth({
     db,
     transactions,
@@ -73,8 +73,8 @@ function onlyWorking(credentials: Credential[], workingTag: string): SignInObser
   );
 }
 
-function opaqueAccounts(db: MemoryDb) {
-  return db.account.filter((account) => account.providerId === "opaque");
+async function opaqueAccounts(db: TestDb) {
+  return (await db.rows("account")).filter((account) => account.providerId === "opaque");
 }
 
 /** Failures before the account switch keep the old credential; after it, the new one. */
@@ -130,7 +130,7 @@ describe.each([
   ];
 
   test.each(signUpFaults)("sign-up failing at %s leaves nothing behind", async (fault) => {
-    const { app, db, auth } = setUp(transactions);
+    const { app, db, auth } = await setUp(transactions);
     const email = "signup-fault@example.com";
 
     app.faults.add(fault);
@@ -144,9 +144,9 @@ describe.each([
     expect(failed.data).toBeNull();
     app.faults.clear();
 
-    expect(db.user.filter((user) => user.email === email)).toHaveLength(0);
-    expect(opaqueAccounts(db)).toHaveLength(0);
-    expect(db.session).toHaveLength(0);
+    expect((await db.rows("user")).filter((user) => user.email === email)).toHaveLength(0);
+    expect(await opaqueAccounts(db)).toHaveLength(0);
+    expect(await db.rows("session")).toHaveLength(0);
 
     const retry: Credential = { password: "second-password", tag: "second" };
     const signUp = await createTestClient(auth).authClient.signUp.opaque({
@@ -173,7 +173,7 @@ describe.each([
   test.each(credentialFaults)(
     "password change failing at %s keeps a matching credential and payload",
     async (fault) => {
-      const { app, auth } = setUp(transactions);
+      const { app, auth } = await setUp(transactions);
       const email = "change-fault@example.com";
       const { browser, old } = await registerUser(auth, email);
       const phone = await signInElsewhere(auth, email, old);
@@ -204,7 +204,7 @@ describe.each([
   test.each(credentialFaults)(
     "password reset failing at %s keeps a matching credential and payload",
     async (fault) => {
-      const { app, auth } = setUp(transactions);
+      const { app, auth } = await setUp(transactions);
       const email = "reset-fault@example.com";
       const { old } = await registerUser(auth, email);
       const phone = await signInElsewhere(auth, email, old);

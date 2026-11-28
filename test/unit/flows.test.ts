@@ -2,10 +2,10 @@ import { client as opaqueProtocol } from "@serenity-kit/opaque";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
+  createTestDb,
   expectNotSent,
   postJson,
   serverSetupForTests,
@@ -24,7 +24,7 @@ afterEach(() => {
 describe("sign-up and sign-in", () => {
   test("registration and login yield the same export key; secrets never leave the client", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const browser = createTestClient(auth);
@@ -55,7 +55,7 @@ describe("sign-up and sign-in", () => {
   // Runs two full rfc-recommended Argon2id derivations (sign-up and sign-in), which takes several
   // seconds on shared CI runners, well past Vitest's 5 s default.
   test("the default rfc-recommended profile works end to end", { timeout: 30_000 }, async () => {
-    const auth = createTestAuth({ db: createMemoryDb(), opaque: { serverSetup } });
+    const auth = createTestAuth({ db: await createTestDb(), opaque: { serverSetup } });
     const browser = createTestClient(auth, {});
     const password = "default-profile-password";
 
@@ -82,7 +82,7 @@ describe("sign-up and sign-in", () => {
   });
 
   test("a configured server identifier is advertised and bound into the record", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({
       db,
       opaque: {
@@ -117,7 +117,7 @@ describe("sign-up and sign-in", () => {
   });
 
   test("keyStretching is stored per account and survives a later default change", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const before = createTestAuth({ db, opaque: { serverSetup, keyStretching: CHEAP_STRETCHING } });
     const signUp = await createTestClient(before).authClient.signUp.opaque({
       email: "profile@example.com",
@@ -159,7 +159,7 @@ describe("sign-up and sign-in", () => {
 
   test("a pinned client profile aborts before complete when the server differs", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const browser = createTestClient(auth, {
@@ -177,7 +177,7 @@ describe("sign-up and sign-in", () => {
 
   test("sign-up payloads require commitPayload and pass validatePayload", async () => {
     const withoutHooks = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const unsupported = await createTestClient(withoutHooks).authClient.signUp.opaque({
@@ -189,7 +189,7 @@ describe("sign-up and sign-in", () => {
     expect(unsupported.error?.code).toBe("PAYLOAD_NOT_SUPPORTED");
 
     const app = createPayloadApp();
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const withHooks = createTestAuth({
       db,
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING, hooks: app.hooks },
@@ -201,7 +201,7 @@ describe("sign-up and sign-in", () => {
       payload: { invalid: true },
     });
     expect(rejected.error?.code).toBe("INVALID_PAYLOAD");
-    expect(db.user).toHaveLength(0);
+    expect(await db.rows("user")).toHaveLength(0);
 
     let keySeenByCallback: string | undefined;
     const accepted = await createTestClient(withHooks).authClient.signUp.opaque({
@@ -227,7 +227,7 @@ describe("sign-up and sign-in", () => {
 describe("single-use state", () => {
   test("a consumed sign-in state cannot be replayed", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const browser = createTestClient(auth);
@@ -262,7 +262,7 @@ describe("single-use state", () => {
 
   test("an expired sign-up state is rejected", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const registration = opaqueProtocol.startRegistration({ password: "pw-expired" });
@@ -293,7 +293,7 @@ describe("single-use state", () => {
 
 describe("existing emails", () => {
   test("sign-up for an existing email answers like email/password sign-up and never attaches", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({
       db,
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
@@ -318,11 +318,13 @@ describe("existing emails", () => {
     });
     expect(opaqueSignUp.error?.status).toBe(emailSignUp.status);
     expect(opaqueSignUp.error?.code).toBe(emailSignUp.body?.code);
-    expect(db.account.filter((account) => account.providerId === "opaque")).toHaveLength(0);
+    expect(
+      (await db.rows("account")).filter((account) => account.providerId === "opaque"),
+    ).toHaveLength(0);
   });
 
   test("an email registered between challenge and complete is re-checked at complete", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({
       db,
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
@@ -354,13 +356,14 @@ describe("existing emails", () => {
     });
     expect(complete.status).toBe(422);
     expect(complete.body?.code).toBe("USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
-    expect(db.user).toHaveLength(1);
-    expect(db.account).toHaveLength(1);
-    expect(db.account[0]?.providerId).toBe("credential");
+    expect(await db.rows("user")).toHaveLength(1);
+    const accounts = await db.rows("account");
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.providerId).toBe("credential");
   });
 
   test("with requireEmailVerification, existing emails get a synthetic success and sign-in requires verification", async () => {
-    const db = createMemoryDb();
+    const db = await createTestDb();
     const auth = createTestAuth({
       db,
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
@@ -383,8 +386,8 @@ describe("existing emails", () => {
     expect(duplicate.error).toBeNull();
     expect(duplicate.data?.token).toBeNull();
     expect(duplicate.data?.user.id).not.toBe(first.data?.user.id);
-    expect(db.user).toHaveLength(1);
-    expect(db.account).toHaveLength(1);
+    expect(await db.rows("user")).toHaveLength(1);
+    expect(await db.rows("account")).toHaveLength(1);
 
     const browser = createTestClient(auth);
     const unverified = await browser.authClient.signIn.opaque({
@@ -404,7 +407,7 @@ describe("password change", () => {
   test("replaces the caller session, revokes other sessions, and retires the old password", async () => {
     const app = createPayloadApp();
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING, hooks: app.hooks },
     });
     const laptop = createTestClient(auth);
@@ -461,7 +464,7 @@ describe("password change", () => {
 
   test("requires a session", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
     });
     const result = await createTestClient(auth).authClient.opaque.changePassword({
@@ -475,7 +478,7 @@ describe("password change", () => {
 async function setUpResettableUser() {
   const app = createPayloadApp();
   const auth = createTestAuth({
-    db: createMemoryDb(),
+    db: await createTestDb(),
     opaque: {
       serverSetup,
       keyStretching: CHEAP_STRETCHING,
@@ -575,7 +578,7 @@ describe("password reset", () => {
 describe("server-only endpoints", () => {
   test("are not reachable over HTTP", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: {
         serverSetup,
         keyStretching: CHEAP_STRETCHING,
@@ -595,7 +598,7 @@ describe("server-only endpoints", () => {
 describe("rate limits", () => {
   test("sign-in challenges are limited per client", async () => {
     const auth = createTestAuth({
-      db: createMemoryDb(),
+      db: await createTestDb(),
       opaque: { serverSetup, keyStretching: CHEAP_STRETCHING },
       options: { rateLimit: { enabled: true } },
     });

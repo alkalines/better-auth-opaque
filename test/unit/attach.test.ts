@@ -1,6 +1,6 @@
 import { client as opaqueProtocol } from "@serenity-kit/opaque";
 import type { BetterAuthOptions } from "better-auth";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
   OPAQUE_ACCOUNT_FIELDS,
   OPAQUE_PATHS,
@@ -10,10 +10,10 @@ import {
 import type { OpaqueOptions } from "../../src/server/index.ts";
 import {
   CHEAP_STRETCHING,
-  createMemoryDb,
   createPayloadApp,
   createTestAuth,
   createTestClient,
+  createTestDb,
   postJson,
   serverSetupForTests,
   type AuthUnderTest,
@@ -45,7 +45,7 @@ type SetUpConfig = {
 
 /** A user who signed up with Better Auth's classic email/password and is signed in. */
 async function setUpClassic(config: SetUpConfig = {}) {
-  const db = createMemoryDb();
+  const db = await createTestDb();
   const app = createPayloadApp();
   const changes: CredentialChange[] = [];
   const hooks: OpaqueHooks = {
@@ -56,7 +56,11 @@ async function setUpClassic(config: SetUpConfig = {}) {
   };
   const auth = createTestAuth({
     db,
-    options: { emailAndPassword: { enabled: true }, ...config.options },
+    options: {
+      emailAndPassword: { enabled: true },
+      databaseHooks: app.databaseHooks,
+      ...config.options,
+    },
     opaque: {
       serverSetup,
       keyStretching: CHEAP_STRETCHING,
@@ -74,10 +78,13 @@ async function setUpClassic(config: SetUpConfig = {}) {
   expect(signUp.error).toBeNull();
   const userId = signUp.data!.user.id;
 
-  const opaqueRows = () => db.account.filter((row) => row.providerId === "opaque");
-  const classicRows = () => db.account.filter((row) => row.providerId === "credential");
-  const sessionRows = () => db.session.filter((row) => row.userId === userId);
-  const currentVersion = () => opaqueRows()[0]?.[OPAQUE_ACCOUNT_FIELDS.credentialVersion];
+  const opaqueRows = async () =>
+    (await db.rows("account")).filter((row) => row.providerId === "opaque");
+  const classicRows = async () =>
+    (await db.rows("account")).filter((row) => row.providerId === "credential");
+  const sessionRows = async () => (await db.rows("session")).filter((row) => row.userId === userId);
+  const currentVersion = async () =>
+    (await opaqueRows())[0]?.[OPAQUE_ACCOUNT_FIELDS.credentialVersion];
   return {
     db,
     app,
@@ -94,6 +101,23 @@ async function setUpClassic(config: SetUpConfig = {}) {
 
 const cookieHeader = (client: TestClient) =>
   [...client.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
+
+/** A pause that holds every caller until `count` callers arrived, then releases them together. */
+function barrier(count: number): () => Promise<void> {
+  let arrived = 0;
+  let release!: () => void;
+  // `Promise.withResolvers` is not in the repo's TypeScript lib target.
+  const allArrived = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return async () => {
+    arrived += 1;
+    if (arrived === count) {
+      release();
+    }
+    await allArrived;
+  };
+}
 
 const post = (
   auth: AuthUnderTest,
@@ -139,7 +163,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     expect(
       (await elsewhere.authClient.signIn.email({ email: EMAIL, password: CLASSIC })).error,
     ).toBeNull();
-    expect(sessionRows()).toHaveLength(2);
+    expect(await sessionRows()).toHaveLength(2);
 
     const attached = await browser.authClient.opaque.attachCredential({
       newPassword: OPAQUE_PASSWORD,
@@ -148,10 +172,10 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     expect(attached.error).toBeNull();
     expect(attached.data?.token).toEqual(expect.any(String));
 
-    expect(opaqueRows()).toHaveLength(1);
-    expect(classicRows()).toHaveLength(0);
-    expect(sessionRows()).toHaveLength(1);
-    expect(sessionRows()[0]?.token).toBe(attached.data?.token);
+    expect(await opaqueRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(0);
+    expect(await sessionRows()).toHaveLength(1);
+    expect((await sessionRows())[0]?.token).toBe(attached.data?.token);
     expect((await browser.authClient.getSession()).data?.user.id).toBe(userId);
     expect((await elsewhere.authClient.getSession()).data).toBeNull();
 
@@ -174,7 +198,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     await expect(auth.api.removeClassicCredential({ body: { userId } })).rejects.toMatchObject({
       body: { code: "OPAQUE_ACCOUNT_NOT_FOUND" },
     });
-    expect(classicRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(1);
 
     expect(
       (
@@ -184,7 +208,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
         })
       ).error,
     ).toBeNull();
-    expect(classicRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(1);
     expect(
       (await createTestClient(auth).authClient.signIn.email({ email: EMAIL, password: CLASSIC }))
         .error,
@@ -193,7 +217,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     await expect(auth.api.removeClassicCredential({ body: { userId } })).resolves.toEqual({
       status: true,
     });
-    expect(classicRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(0);
   });
 
   test("the server-only removal is not reachable over HTTP", async () => {
@@ -204,15 +228,15 @@ describe("attach a first OPAQUE credential to a classic user", () => {
 
   test("a wrong classic password is rejected and nothing is created", async () => {
     const { auth, browser, db, opaqueRows, classicRows } = await setUpClassic();
-    const verificationBefore = db.verification.length;
+    const verificationBefore = (await db.rows("verification")).length;
     const wrong = await browser.authClient.opaque.attachCredential({
       newPassword: OPAQUE_PASSWORD,
       currentPassword: "not-the-classic-password",
     });
     expect(wrong.error?.code).toBe("INVALID_PASSWORD");
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
-    expect(db.verification.length).toBe(verificationBefore);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
+    expect((await db.rows("verification")).length).toBe(verificationBefore);
     expect(
       (await createTestClient(auth).authClient.signIn.email({ email: EMAIL, password: CLASSIC }))
         .error,
@@ -225,31 +249,33 @@ describe("attach a first OPAQUE credential to a classic user", () => {
       newPassword: OPAQUE_PASSWORD,
     });
     expect(missing.error?.code).toBe("INVALID_PASSWORD");
-    expect(opaqueRows()).toHaveLength(0);
+    expect(await opaqueRows()).toHaveLength(0);
   });
 
   test("requireCurrentPassword: false accepts a fresh session and refuses a stale one", async () => {
-    const { browser, sessionRows, opaqueRows } = await setUpClassic({
+    const { browser, opaqueRows } = await setUpClassic({
       opaque: { attach: { requireCurrentPassword: false, freshSessionAge: 600 } },
     });
-    for (const row of sessionRows()) {
-      row.createdAt = new Date(Date.now() - 60 * 60 * 1000);
+    // An hour later the sign-in session is stale. Only `Date` is faked: sessions are cached in
+    // secondary storage on some backends, so their rows cannot be backdated in one place.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 60 * 60 * 1000);
+      const stale = await browser.authClient.opaque.attachCredential({
+        newPassword: OPAQUE_PASSWORD,
+      });
+      expect(stale.error?.code).toBe("SESSION_NOT_FRESH");
+      expect(stale.error?.status).toBe(403);
+      expect(await opaqueRows()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
     }
-    const stale = await browser.authClient.opaque.attachCredential({
-      newPassword: OPAQUE_PASSWORD,
-    });
-    expect(stale.error?.code).toBe("SESSION_NOT_FRESH");
-    expect(stale.error?.status).toBe(403);
-    expect(opaqueRows()).toHaveLength(0);
 
-    for (const row of sessionRows()) {
-      row.createdAt = new Date();
-    }
     const fresh = await browser.authClient.opaque.attachCredential({
       newPassword: OPAQUE_PASSWORD,
     });
     expect(fresh.error).toBeNull();
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
   });
 
   test("a user who already has an OPAQUE credential gets OPAQUE_ACCOUNT_EXISTS", async () => {
@@ -272,32 +298,36 @@ describe("attach a first OPAQUE credential to a classic user", () => {
   });
 
   test("a classic password changed between challenge and complete fails with CREDENTIAL_CHANGED", async () => {
-    const { auth, browser, classicRows, opaqueRows } = await setUpClassic();
+    const { auth, browser, db, classicRows, opaqueRows } = await setUpClassic();
     const challenge = await rawAttachChallenge(auth, browser, {
       password: OPAQUE_PASSWORD,
       currentPassword: CLASSIC,
     });
     expect(challenge.response.status).toBe(200);
 
-    classicRows()[0]!.password = "replaced-hash";
+    await db.update("account", (await classicRows())[0]!.id as string, {
+      password: "replaced-hash",
+    });
     const complete = await post(auth, browser, OPAQUE_PATHS.attachComplete, {
       stateId: challenge.response.body!.stateId,
       registrationRecord: finishRawRegistration(challenge),
     });
     expect(complete.status).toBe(409);
     expect(complete.body?.code).toBe("CREDENTIAL_CHANGED");
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
   });
 
   test("a classic password changed while commitPayload runs fails with CREDENTIAL_CHANGED", async () => {
-    const { auth, browser, app, classicRows, opaqueRows, userId } = await setUpClassic();
+    const { auth, browser, app, db, classicRows, opaqueRows, userId } = await setUpClassic();
     const challenge = await rawAttachChallenge(auth, browser, {
       password: OPAQUE_PASSWORD,
       currentPassword: CLASSIC,
     });
     app.pauses.set("commitPayload", async () => {
-      classicRows()[0]!.password = "replaced-hash";
+      await db.update("account", (await classicRows())[0]!.id as string, {
+        password: "replaced-hash",
+      });
     });
 
     const complete = await post(auth, browser, OPAQUE_PATHS.attachComplete, {
@@ -307,8 +337,8 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     });
     expect(complete.status).toBe(409);
     expect(complete.body?.code).toBe("CREDENTIAL_CHANGED");
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
     expect((await browser.authClient.getSession()).data?.user.id).toBe(userId);
   });
 
@@ -341,16 +371,16 @@ describe("attach a first OPAQUE credential to a classic user", () => {
       internalAdapter.findAccounts = original;
       app.pauses.clear();
     }
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
-    expect(sessionRows()).toHaveLength(2);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
+    expect(await sessionRows()).toHaveLength(2);
 
     const retry = await browser.authClient.opaque.attachCredential({
       newPassword: OPAQUE_PASSWORD,
       currentPassword: CLASSIC,
     });
     expect(retry.error).toBeNull();
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
   });
 
   test("the challenge state is single use and bound to its user", async () => {
@@ -384,10 +414,10 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     });
     expect(crossUser.status).toBe(400);
     expect(crossUser.body?.code).toBe("INVALID_STATE");
-    expect(opaqueRows()).toHaveLength(0);
+    expect(await opaqueRows()).toHaveLength(0);
 
     expect((await post(auth, browser, OPAQUE_PATHS.attachComplete, body)).status).toBe(200);
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
 
     // The attach replaced the caller's session, so replay through a new signed-in client.
     const fresh = createTestClient(auth);
@@ -397,7 +427,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     const again = await post(auth, fresh, OPAQUE_PATHS.attachComplete, body);
     expect(again.status).toBe(400);
     expect(again.body?.code).toBe("INVALID_STATE");
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
   });
 
   test("concurrent attaches never leave two OPAQUE accounts", { timeout: 30_000 }, async () => {
@@ -411,20 +441,11 @@ describe("attach a first OPAQUE credential to a classic user", () => {
       currentPassword: CLASSIC,
     });
 
-    // Hold both flows after their pre-checks so both insert before either re-checks.
-    let arrived = 0;
-    let release!: () => void;
-    // `Promise.withResolvers` is not in the repo's TypeScript lib target.
-    const bothArrived = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    app.pauses.set("commitPayload", async () => {
-      arrived += 1;
-      if (arrived === 2) {
-        release();
-      }
-      await bothArrived;
-    });
+    // Both flows pass their pre-checks, both insert before either re-checks, and both re-check
+    // before either backs out, on any database: the barriers sit on hooks, not on scheduling.
+    app.pauses.set("commitPayload", barrier(2));
+    app.pauses.set("account.create.after", barrier(2));
+    app.pauses.set("account.delete.before", barrier(2));
 
     const results = await Promise.all(
       [first, second].map((challenge) =>
@@ -441,8 +462,8 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     for (const result of results) {
       expect(result.body?.code).toBe("OPAQUE_ACCOUNT_EXISTS");
     }
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
 
     app.pauses.clear();
     const retry = await browser.authClient.opaque.attachCredential({
@@ -450,7 +471,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
       currentPassword: CLASSIC,
     });
     expect(retry.error).toBeNull();
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
   });
 
   test("a malformed registration record is rejected before anything is written", async () => {
@@ -459,7 +480,7 @@ describe("attach a first OPAQUE credential to a classic user", () => {
       password: OPAQUE_PASSWORD,
       currentPassword: CLASSIC,
     });
-    const sessionsBefore = sessionRows().length;
+    const sessionsBefore = (await sessionRows()).length;
 
     const complete = await post(auth, browser, OPAQUE_PATHS.attachComplete, {
       stateId: challenge.response.body!.stateId,
@@ -467,24 +488,24 @@ describe("attach a first OPAQUE credential to a classic user", () => {
     });
     expect(complete.status).toBe(400);
     expect(complete.body?.code).toBe("INVALID_OPAQUE_MESSAGE");
-    expect(opaqueRows()).toHaveLength(0);
-    expect(classicRows()).toHaveLength(1);
-    expect(sessionRows()).toHaveLength(sessionsBefore);
+    expect(await opaqueRows()).toHaveLength(0);
+    expect(await classicRows()).toHaveLength(1);
+    expect(await sessionRows()).toHaveLength(sessionsBefore);
   });
 
   test("the per-account rate limit refuses attach challenges", async () => {
     const { auth, browser, db, opaqueRows } = await setUpClassic({
       opaque: { accountRateLimit: ({ flow }) => flow !== "attach" },
     });
-    const verificationBefore = db.verification.length;
+    const verificationBefore = (await db.rows("verification")).length;
     const challenge = await rawAttachChallenge(auth, browser, {
       password: OPAQUE_PASSWORD,
       currentPassword: CLASSIC,
     });
     expect(challenge.response.status).toBe(429);
     expect(challenge.response.body?.code).toBe("TOO_MANY_ATTEMPTS");
-    expect(db.verification.length).toBe(verificationBefore);
-    expect(opaqueRows()).toHaveLength(0);
+    expect((await db.rows("verification")).length).toBe(verificationBefore);
+    expect(await opaqueRows()).toHaveLength(0);
   });
 });
 
@@ -502,8 +523,8 @@ async function setUpOpaqueUser(config: SetUpConfig = {}) {
 describe("credential changes of an OPAQUE user", () => {
   test("a malformed registration record is rejected at change-password complete", async () => {
     const { auth, browser, opaqueRows, sessionRows } = await setUpOpaqueUser();
-    const recordBefore = opaqueRows()[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord];
-    const sessionsBefore = sessionRows().length;
+    const recordBefore = (await opaqueRows())[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord];
+    const sessionsBefore = (await sessionRows()).length;
 
     const login = opaqueProtocol.startLogin({ password: OPAQUE_PASSWORD });
     const registration = opaqueProtocol.startRegistration({ password: CHANGED });
@@ -525,15 +546,15 @@ describe("credential changes of an OPAQUE user", () => {
       registrationRecord: "AAAA",
     });
     expect(complete.body?.code).toBe("INVALID_OPAQUE_MESSAGE");
-    expect(opaqueRows()[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord]).toBe(recordBefore);
-    expect(sessionRows()).toHaveLength(sessionsBefore);
+    expect((await opaqueRows())[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord]).toBe(recordBefore);
+    expect(await sessionRows()).toHaveLength(sessionsBefore);
   });
 
   test("a malformed registration record is rejected at reset complete", async () => {
     const { auth, opaqueRows } = await setUpOpaqueUser();
     const { url } = await auth.api.createPasswordResetToken({ body: { email: EMAIL } });
     const token = new URL(url).searchParams.get("token")!;
-    const recordBefore = opaqueRows()[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord];
+    const recordBefore = (await opaqueRows())[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord];
 
     const registration = opaqueProtocol.startRegistration({ password: CHANGED });
     const challenge = await postJson(auth, OPAQUE_PATHS.resetChallenge, {
@@ -546,14 +567,14 @@ describe("credential changes of an OPAQUE user", () => {
       registrationRecord: "AAAA",
     });
     expect(complete.body?.code).toBe("INVALID_OPAQUE_MESSAGE");
-    expect(opaqueRows()[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord]).toBe(recordBefore);
+    expect((await opaqueRows())[0]?.[OPAQUE_ACCOUNT_FIELDS.registrationRecord]).toBe(recordBefore);
   });
 
   test("the per-account rate limit refuses change-password challenges", async () => {
     const { auth, browser, db } = await setUpOpaqueUser({
       opaque: { accountRateLimit: ({ flow }) => flow !== "change-password" },
     });
-    const verificationBefore = db.verification.length;
+    const verificationBefore = (await db.rows("verification")).length;
     const response = await post(auth, browser, OPAQUE_PATHS.changePasswordChallenge, {
       loginRequest: opaqueProtocol.startLogin({ password: OPAQUE_PASSWORD }).startLoginRequest,
       registrationRequest: opaqueProtocol.startRegistration({ password: CHANGED })
@@ -561,7 +582,7 @@ describe("credential changes of an OPAQUE user", () => {
     });
     expect(response.status).toBe(429);
     expect(response.body?.code).toBe("TOO_MANY_ATTEMPTS");
-    expect(db.verification.length).toBe(verificationBefore);
+    expect((await db.rows("verification")).length).toBe(verificationBefore);
   });
 });
 
@@ -577,7 +598,7 @@ describe("onCredentialChanged", () => {
         })
       ).error,
     ).toBeNull();
-    const attachedVersion = currentVersion() as string;
+    const attachedVersion = (await currentVersion()) as string;
     expect(changes).toEqual([
       {
         userId,
@@ -596,7 +617,7 @@ describe("onCredentialChanged", () => {
         })
       ).error,
     ).toBeNull();
-    const changedVersion = currentVersion() as string;
+    const changedVersion = (await currentVersion()) as string;
     expect(changes).toHaveLength(2);
     expect(changes[1]).toEqual({
       userId,
@@ -620,7 +641,7 @@ describe("onCredentialChanged", () => {
       userId,
       flow: "reset-password",
       previousCredentialVersion: changedVersion,
-      credentialVersion: currentVersion(),
+      credentialVersion: await currentVersion(),
       sessionsRevoked: true,
     });
   });
@@ -641,7 +662,7 @@ describe("onCredentialChanged", () => {
     } finally {
       internalAdapter.deleteUserSessions = original;
     }
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
     expect(changes).toHaveLength(1);
     expect(changes[0]?.sessionsRevoked).toBe(false);
   });
@@ -659,7 +680,7 @@ describe("onCredentialChanged", () => {
     expect(attached.error).not.toBeNull();
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({ flow: "attach", previousCredentialVersion: null });
-    expect(sessionRows()).toHaveLength(0);
+    expect(await sessionRows()).toHaveLength(0);
   });
 
   test("a throwing hook is returned to the client without rolling the change back", async () => {
@@ -677,8 +698,8 @@ describe("onCredentialChanged", () => {
       currentPassword: CLASSIC,
     });
     expect(attached.error).not.toBeNull();
-    expect(opaqueRows()).toHaveLength(1);
-    expect(classicRows()).toHaveLength(0);
+    expect(await opaqueRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(0);
     expect(
       (
         await createTestClient(auth).authClient.signIn.opaque({
@@ -735,9 +756,9 @@ describe("reset enrolment of a classic-only user", () => {
       newPassword: OPAQUE_PASSWORD,
     });
     expect(reset.error).toBeNull();
-    expect(opaqueRows()).toHaveLength(1);
-    expect(classicRows()).toHaveLength(0);
-    expect(sessionRows()).toHaveLength(0);
+    expect(await opaqueRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(0);
+    expect(await sessionRows()).toHaveLength(0);
     expect((await browser.authClient.getSession()).data).toBeNull();
 
     const signIn = await createTestClient(auth).authClient.signIn.opaque({
@@ -765,7 +786,7 @@ describe("reset enrolment of a classic-only user", () => {
         userId,
         flow: "reset-password",
         previousCredentialVersion: null,
-        credentialVersion: currentVersion(),
+        credentialVersion: await currentVersion(),
         sessionsRevoked: true,
       },
     ]);
@@ -783,7 +804,7 @@ describe("reset enrolment of a classic-only user", () => {
         })
       ).error,
     ).toBeNull();
-    expect(classicRows()).toHaveLength(1);
+    expect(await classicRows()).toHaveLength(1);
   });
 
   test("an enrolment link dies once the user owns an OPAQUE credential", async () => {
@@ -841,14 +862,14 @@ describe("reset enrolment of a classic-only user", () => {
     });
     expect(complete.status).toBe(409);
     expect(complete.body?.code).toBe("OPAQUE_ACCOUNT_EXISTS");
-    expect(opaqueRows()).toHaveLength(1);
+    expect(await opaqueRows()).toHaveLength(1);
   });
 
   test("an enrolment link is rejected once an OPAQUE row with undecodable fields exists", async () => {
     const { auth, db, classicRows } = await setUpClassic();
     const token = await enrolmentLink(auth);
-    const { password: _password, ...classic } = classicRows()[0]!;
-    db.account.push({
+    const { password: _password, ...classic } = (await classicRows())[0]!;
+    await db.insert("account", {
       ...classic,
       id: "undecodable-opaque-row",
       accountId: "undecodable-opaque-account",
