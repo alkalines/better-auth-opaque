@@ -1,0 +1,56 @@
+name: Prepare release
+
+on:
+  push:
+    branches: ["release/*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: >-
+      github.ref_type == 'branch' && startsWith(github.ref_name, 'release/') &&
+      (github.event_name == 'workflow_dispatch' || github.event.created)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Commit version and push tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#release/}"
+          number='(0|[1-9][0-9]*)'
+          identifier="($number|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          if [[ ! $VERSION =~ ^v?$number\.$number\.$number(-$identifier(\.$identifier)*)?$ ]]; then
+            echo 'Use release/vMAJOR.MINOR.PATCH or release/vMAJOR.MINOR.PATCH-PRERELEASE.' >&2
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
+          TAG="v$VERSION"
+          node - "$VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          manifest.version = process.argv[2];
+          fs.writeFileSync('package.json', `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- package.json
+          git commit --allow-empty -m "chore: Release $TAG"
+          git tag -a "$TAG" -m "Release $TAG"
+          # Either both refs advance or neither does, including when the branch moved or the tag exists.
+          git push --atomic --force-with-lease="$GITHUB_REF:$GITHUB_SHA" origin "HEAD:$GITHUB_REF" "refs/tags/$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Start publishing workflow on the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # GITHUB_TOKEN pushes do not trigger workflows. Dispatch explicitly to keep provenance on the tag.
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

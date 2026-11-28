@@ -31,9 +31,8 @@ export default defineConfig({
   use: { baseURL, trace: "retain-on-failure" },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    // Builds the package (the example consumes `dist/`), migrates the isolated database, then
-    // starts Vite on the fixed test port.
-    command: `bun run --cwd ../.. build && bun run db:setup && vite dev --port ${port} --strictPort`,
+    // Releases supply dist/ from the exact tarball being published; local runs build it here.
+    command: `${process.env.E2E_USE_PREBUILT_PACKAGE === "true" ? "" : "bun run --cwd ../.. build && "}bun run db:setup && vite dev --port ${port} --strictPort`,
     cwd: join(import.meta.dirname, ".."),
     url: `${baseURL}/`,
     reuseExistingServer: false,

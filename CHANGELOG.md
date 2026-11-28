@@ -2,6 +2,10 @@
 
 All notable changes to `@alkalines/better-auth-opaque` are recorded here. The project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- Creating a `release/vX.Y.Z` branch now commits the version bump, tags it, and starts publishing. Release integration checks and both registries reuse one tarball. Public npm releases still require 2FA approval.
+
 ## 0.2.1 (2026-11-22)
 
 An opt-in sign-in signal for users who have not migrated from a classic password. No breaking changes; with the option off, behavior is unchanged.

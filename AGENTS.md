@@ -52,7 +52,9 @@
 ## Compatibility and releases
 
 - Semver. Breaking changes: endpoint paths or bodies, stored fields, hook signatures, error codes, stretching defaults, supported peer ranges. Stored-data changes need a documented migration.
-- `version` in `package.json` changes only in a release PR. On `v*.*.*` tags CI publishes to GitHub Packages and stages the npm release (`npm stage publish`); a maintainer approves the staged version with 2FA before it goes live. **Never run `npm publish` locally** after the first bootstrap release.
+- To release, update `CHANGELOG.md` on `main`, then push a new branch from the commit to ship: `git push origin HEAD:refs/heads/release/vX.Y.Z`. Prepare release sets `package.json` from the branch name, commits it to the branch, pushes the matching tag, and starts Release on that tag. Use `release/vX.Y.Z-rc.1` for an npm `next` prerelease. Branch creation authorizes publishing, so restrict who can create `release/*` if repository write access is broader than release access.
+- Release tests and publishes the same tarball to GitHub Packages and stages it on npm. A maintainer approves the staged version on npmjs.com with 2FA before it goes live. **Never run `npm publish` locally** after the first bootstrap release.
+- A branch that already exists can be prepared manually from Actions if it contains these workflows and its tag has not been created. If the tag exists but dispatch failed, run Release on that tag with `gh workflow run release.yml --ref vX.Y.Z`. If Release started and failed, rerun its failed jobs rather than moving the tag.
 
 ## Verification
 

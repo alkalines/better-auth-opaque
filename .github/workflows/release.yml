@@ -3,19 +3,24 @@ name: Release
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 concurrency:
   group: release
-  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
 
 jobs:
   full:
+    needs: pack
     uses: ./.github/workflows/full.yml
+    with:
+      packed: true
 
   pack:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -40,7 +45,6 @@ jobs:
           esac
       - run: bun run typecheck
       - run: bun run test
-      - run: bun run build
       - run: bun run check:package
       # npm pack does not create --pack-destination.
       - run: mkdir -p pack && npm pack --pack-destination pack

@@ -5,6 +5,11 @@ on:
     types: [labeled, synchronize, reopened]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      packed:
+        description: Test the package artifact built by the calling release workflow
+        type: boolean
+        default: false
 
 concurrency:
   group: full-${{ github.ref }}
@@ -32,7 +37,15 @@ jobs:
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      - uses: actions/download-artifact@v8
+        if: inputs.packed
+        with:
+          name: package
+          path: ${{ runner.temp }}/release-package
+      - if: inputs.packed
+        run: tar -xzf "$RUNNER_TEMP"/release-package/*.tgz --strip-components=1 package/dist
+      - if: "!inputs.packed"
+        run: bun run build
       - run: bun run test:convex
 
   drizzle:
@@ -98,5 +111,13 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
       - run: bunx playwright install --with-deps chromium
         working-directory: examples/tanstack-start
-      - run: bun run build
+      - uses: actions/download-artifact@v8
+        if: inputs.packed
+        with:
+          name: package
+          path: ${{ runner.temp }}/release-package
+      - if: inputs.packed
+        run: tar -xzf "$RUNNER_TEMP"/release-package/*.tgz --strip-components=1 package/dist
       - run: bun run test:e2e
+        env:
+          E2E_USE_PREBUILT_PACKAGE: ${{ inputs.packed }}
